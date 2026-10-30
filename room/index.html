@@ -491,7 +491,30 @@ function tick(now){
   last = now;
   step(now, dt);
   draw(now);
-  requestAnimationFrame(tick);
+  
+/* 读我排的行程：服务端 /api/route 有新的 points 就依次走过去 */
+let lastRouteId = -1, routeQueue = [], routeTimer = null;
+function runRoutePoint(){
+  if(!routeQueue.length) return;
+  const p = routeQueue.shift();
+  setTarget({ x: p.x, y: p.y });
+  clearTimeout(routeTimer);
+  routeTimer = setTimeout(runRoutePoint, (Number(p.pause) || 0) + 2500);
+}
+setInterval(async () => {
+  if(!API) return;                       // 静态托管没有后端
+  try{
+    const r = await (await fetch(API + '/route', { cache:'no-store' })).json();
+    if(r && r.id && r.id !== lastRouteId && Array.isArray(r.points) && r.points.length){
+      lastRouteId = r.id;
+      routeQueue = r.points.slice();
+      if(Number(r.speed) > 0) M.speed = Number(r.speed);
+      runRoutePoint();
+    }
+  }catch(e){}
+}, 2500);
+
+requestAnimationFrame(tick);
 }
 
 /* ---------- 交互 ---------- */

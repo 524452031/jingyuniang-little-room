@@ -229,6 +229,7 @@ preloadFurniture();
 
 
 /* ---------- 性能：离屏缓存 ---------- */
+let WHY = '';   // 最近一次改动是谁做的
 let BGC = null;                  // 背景 + 屋子，只画一次
 const SPR = new Map();           // 贴图按目标尺寸缓存
 let lastSig = '';                // 上一次画面的状态指纹
@@ -350,7 +351,7 @@ function draw(now){
   const cellOk = GRID ? walkable(Math.floor(M.x/CELL), Math.floor(M.y/CELL)) : false;
   hud.textContent = '格 ' + (cellOk ? '可走' : '不可走') + '  路径 ' + (PATH ? PATH.length : 0) + '  格总数 ' + (GRID ? GRID.reduce((a,b)=>a+b,0) : -1) + '\n' +
     '位置 ' + Math.round(M.x) + ',' + Math.round(M.y) +
-    '   状态 ' + (M.sleeping ? '睡着' : M.moving ? '在走' : '待着') +
+    '   状态 ' + (M.sleeping ? '睡着' : M.moving ? '在走' : '待着') + '  by=' + WHY +
     '   房间 ' + IMG_W + '×' + IMG_H + '\n点地板走过去 · 点她说话 · 点家具做事';
 }
 
@@ -665,10 +666,10 @@ function step(now, dt){
     }
   } else { M.px = M.x; M.py = M.y; M.spinSince = 0; }
   // 一旦发现她在可走区域外（越过边界/坐标异常），立刻拉回最近的合法位置
-  if(!canGo(M.x, M.y) && now - (M.lastSnap || 0) > 400){
+  if(!canGo(M.x, M.y) && !M.action && now - (M.lastSnap || 0) > 400){   // 有动作时别拉（会让坐着的人闪）
     const keep = M.target;                 // 别忘了她本来要去哪
     const q = nearestInside(M.x, M.y);
-    M.x = q.x; M.y = q.y; M.lastSnap = now;
+    M.x = q.x; M.y = q.y; M.lastSnap = now; WHY = 'snap';
     PATH = null; M.moving = false;
     if(keep) setTarget(keep); else M.target = null;
   }
@@ -705,7 +706,7 @@ function step(now, dt){
       const nx = M.x + ddx / Math.hypot(ddx, ddy) * st;
       const ny = M.y + ddy / Math.hypot(ddx, ddy) * st;
       if(canGo(nx, ny)){
-        M.x = nx; M.y = ny;
+        M.x = nx; M.y = ny; WHY = 'path';
       } else if(canGo(nx, M.y)){
         M.x = nx;                       // 先只走横向（贴着边蹭过去）
       } else if(canGo(M.x, ny)){
@@ -732,7 +733,7 @@ function step(now, dt){
   const d = Math.hypot(dx, dy);
   const arriveR = M.action ? 60 : 10;   // 有动作时放宽：差一点也算到，否则永远不触发姿势
   if(d < arriveR){
-    M.moving = false; M.target = null; PATH = null; M.idleAt = performance.now();
+    M.moving = false; M.target = null; PATH = null; M.idleAt = performance.now(); WHY = 'arrive';
     if(blocked(M.x, M.y)){ const q = nearestInside(M.x, M.y); M.x = q.x; M.y = q.y; }
     return;
   }
@@ -741,6 +742,7 @@ function step(now, dt){
   const nx = M.x + dx/d*s, ny = M.y + dy/d*s;
   if(canGo(nx, M.y)) M.x = nx;
   if(canGo(M.x, ny)) M.y = ny;
+  WHY = 'straight';
   if(Math.abs(dx) > 2) M.face = dx > 0 ? 1 : -1;
   // 朝向由移动方向决定，这里不再强制正面
 }

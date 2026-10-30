@@ -402,6 +402,31 @@ function setTarget(p){
 
 
 /* 朝向：方向要稳定 180ms 才换，避免路径拐点造成连转头 */
+
+/* 自己走：随机挑一个可走点（离当前位置不太近） */
+function randomWalkPoint(){
+  for(let tries = 0; tries < 120; tries++){
+    const poly = WALK_POLYS[Math.floor(Math.random() * WALK_POLYS.length)];
+    let minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9;
+    for(const [px, py] of poly){
+      minx = Math.min(minx, px); maxx = Math.max(maxx, px);
+      miny = Math.min(miny, py); maxy = Math.max(maxy, py);
+    }
+    const x = minx + Math.random() * (maxx - minx);
+    const y = miny + Math.random() * (maxy - miny);
+    if(!inPoly(x, y, poly)) continue;
+    if(blocked(x, y)) continue;
+    if(Math.hypot(x - M.x, y - M.y) < 90) continue;
+    return { x, y };
+  }
+  return null;
+}
+
+let nextWanderAt = 0;
+function scheduleWander(now){
+  nextWanderAt = now + 20000 + Math.random() * 20000;   // 20~40 秒
+}
+
 function setViewByDir(dx, dy, now){
   let want;
   if(Math.abs(dx) > Math.abs(dy) * 1.2) want = 'side';
@@ -412,6 +437,17 @@ function setViewByDir(dx, dy, now){
 }
 
 function step(now, dt){
+  // 自己走：空闲且没在做事时，到点就挑个点走过去
+  if(AUTO && !M.moving && !M.target && !M.action && !M.sleeping){
+    if(!nextWanderAt) scheduleWander(now);
+    else if(now > nextWanderAt){
+      const p = randomWalkPoint();
+      if(p) setTarget(p);
+      scheduleWander(now);
+    }
+  } else if(M.moving || M.target || M.action || M.sleeping){
+    nextWanderAt = 0;
+  }
   // 停下了就保持最后的朝向，不自动转回正面
   // 只在完全没路可走时脱困（有路径就别动，否则会来回弹）
   if(!PATH && blocked(M.x, M.y)){
@@ -505,7 +541,8 @@ cv.addEventListener('click', (e) => {
 
   // 点地板
   M.action = null;
-  for(const o of FURN) if(o.wet && o.stage === 2) o.stage = 0;   // 从缸里出来就排空
+  for(const o of FURN) if(o.wet && o.stage === 2) o.stage = 0;
+  nextWanderAt = 0;
   setTarget({ x:px, y:py });
 });
 
@@ -717,6 +754,7 @@ if(!ZONE) /* 启动：从服务端取回上一次的位置 */
 buildGrid();
 
 /* ===== 动作图微调：?act=sink 拖动改位置、滚轮改大小 ===== */
+const AUTO = new URLSearchParams(location.search).get('auto') !== '0';   // ?auto=0 关掉自己走
 const ACT_TUNE = new URLSearchParams(location.search).get('act');
 if(ACT_TUNE){
   const target = FURN.find(o => o.id === ACT_TUNE);

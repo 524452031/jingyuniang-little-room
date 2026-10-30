@@ -267,12 +267,55 @@ function buildBackdrop() {
   return c;
 }
 
+
+/* ---------- 氛围层：浮尘 + 暖光晕（?fx=0 关掉） ---------- */
+const FX_ON = new URLSearchParams(location.search).get('fx') !== '0';
+const FX_A = Math.max(0.2, Math.min(6, Number(new URLSearchParams(location.search).get('fxa')) || 2.2));
+const DUST = [];
+(function initDust(){
+  for(let i = 0; i < 72; i++){
+    DUST.push({
+      x: Math.random() * IMG_W,
+      y: Math.random() * IMG_H,
+      r: 1.0 + Math.random() * 2.2,
+      sp: 5 + Math.random() * 12,        // 每秒上升像素
+      ph: Math.random() * Math.PI * 2,   // 左右摆相位
+      a: (0.10 + Math.random() * 0.22) * FX_A,    // 透明度（受 fxa 控制）
+    });
+  }
+})();
+
+function drawAtmosphere(now, dt){
+  if(!FX_ON) return;
+  // 暖光晕：从中上偏右缓慢呼吸
+  const t = now / 5200;
+  const a = (0.075 + 0.035 * Math.sin(t * Math.PI * 2)) * FX_A;
+  const g = ctx.createRadialGradient(IMG_W * 0.62, IMG_H * 0.18, 40,
+                                     IMG_W * 0.62, IMG_H * 0.18, IMG_W * 0.55);
+  g.addColorStop(0, 'rgba(255, 236, 200, ' + a.toFixed(3) + ')');
+  g.addColorStop(1, 'rgba(255, 236, 200, 0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, IMG_W, IMG_H);
+
+  // 浮尘
+  const step = Math.min(dt, 0.08);
+  for(const d of DUST){
+    d.y -= d.sp * step;
+    if(d.y < -10){ d.y = IMG_H + 10; d.x = Math.random() * IMG_W; }
+    const x = d.x + Math.sin(now / 2600 + d.ph) * 9;
+    ctx.beginPath();
+    ctx.arc(x, d.y, d.r, 0, 6.283);
+    ctx.fillStyle = 'rgba(255, 248, 232, ' + d.a.toFixed(3) + ')';
+    ctx.fill();
+  }
+}
+
 function draw(now){
   // 静止时跳过重画（省电也省卡）
   const sig = [Math.round(M.x), Math.round(M.y), M.view, M.action, M.sleeping,
                bubble.text, bubble.until > now ? 1 : 0, PATH ? PATH.length : 0,
                M.action, Math.round(bubble.id || 0),
-               Math.round(now / (M.sleeping ? 0 : M.moving ? 16 : 125)) || 0].join(',');   // 睡着不重画
+               Math.round(now / (M.sleeping ? 0 : (M.moving || FX_ON) ? 33 : 125)) || 0].join(',');   // 睡着不重画
   if (sig === lastSig) return;
   lastSig = sig;
 
@@ -292,6 +335,8 @@ function draw(now){
   // 背景已整张画在 BGC 里，这里不再填充
 
   // 屋子已画在离屏背景里
+
+  drawAtmosphere(now, 0.016);
 
   // 家具：按 y 排序，她插在中间
   const items = FURN.map(o => ({ kind:'f', o, y:o.y })).concat([{ kind:'her', y:M.y }]);

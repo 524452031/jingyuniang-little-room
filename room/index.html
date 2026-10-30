@@ -30,6 +30,7 @@ window.onerror = function(msg, src, line, col){
   document.body.appendChild(d);
 };
 
+const ROOM_TITLE = { liyas: '莉雅丝的房间', dafeiyu: '大肥鱼的房间' };
 const ROOM_ID = (location.pathname.match(/^\/room\/([a-zA-Z0-9_-]+)/) || [])[1] || 'main';
 /* 两种跑法：
    1) 挂在服务端：/room/<房号>     → 素材走 /room/<房号>/obj/
@@ -39,6 +40,7 @@ const STANDALONE = !/^\/room\/[a-zA-Z0-9_-]+/.test(location.pathname);
 const API = STANDALONE ? '' : '/room/' + ROOM_ID + '/api';
 const ASSET = STANDALONE ? './assets/room/' : '/room/' + ROOM_ID + '/obj/';
 const VIEW_DIR = STANDALONE ? './assets/character/' : '/room/' + ROOM_ID + '/views/';
+document.title = ROOM_TITLE[ROOM_ID] || '小房间';
 const ASSET_V = '71';   // 换素材后 +1，破缓存
 
 const IMG_W = 1199, IMG_H = 702;
@@ -75,11 +77,11 @@ function herImg(name){
 
 /* ---------- 家具（像素坐标，锚点 = 脚下中心） ---------- */
 const FURN = [
-  { id:'bed',    tex:'bed_empty',    act:'act_bed',  actScale:1.15, sx:620, sy:400, x:631, y:292, w:175, label:'床' },
+  { id:'bed',    tex:'bed_empty',    act:'act_bed',  actScale:1.15, sx:600, sy:430, x:631, y:292, w:175, label:'床' },
   { id:'fridge', tex:'fridge_empty', act:null,       x:500, y:326, w:80,  label:'冰箱' },
   { id:'pcdesk', tex:'pcdesk_empty', act:'act_pc',   actScale:1.15, sx:790, sy:430, x:807, y:346, w:140, label:'电脑桌' },
   { id:'table',  tex:'table_empty',  act:'act_eat',  actScale:1.35, sx:686, sy:530, x:686, y:446, w:130, label:'餐桌' },
-  { id:'shelf',  tex:'shelf',        act:null,       x:998, y:418, w:100, label:'书架' },
+  { id:'shelf',  tex:'shelf',        act:null,       sx:975, sy:480, x:998, y:418, w:100, label:'书架' },
   { id:'tub',    tex:'tub_empty',    act:'act_bath', wet:'tub_water', stage:0, actScale:0.95, sx:190, sy:610, x:109, y:540, w:180, label:'浴缸' },
   { id:'sink',   tex:'sink',         act:'act_wash', actScale:1.35, actOffX:-17, actOffY:-6, sx:300, sy:545, x:286, y:469, w:90,  label:'洗漱台' },
   { id:'toilet', tex:'toilet',       act:null,       x:457, y:578, w:100, label:'马桶' }
@@ -172,6 +174,7 @@ function blocked(x, y){
 
 
 /* ---------- 绘制 ---------- */
+let HER_READY = false;   // 位置取回来之前不画她，避免闪
 let bubble = { text:'', until:0 };
 let BG_GRAD = null;
 
@@ -225,7 +228,7 @@ function draw(now){
   const acting = M.action && !M.moving;
   for(const it of items){
     if(it.kind === 'her'){
-      const hiddenBy = acting && ['bed','pcdesk','table','tub','sink'].includes(M.action);
+      const hiddenBy = !HER_READY || acting && ['bed','pcdesk','table','tub','sink'].includes(M.action);
       if(!hiddenBy) drawHer(now);
       continue;
     }
@@ -263,7 +266,9 @@ function draw(now){
 }
 
 function drawHer(now){
-  const reading = M.action === 'shelf' && !M.moving;
+  const shelfO = FURN.find(o => o.id === 'shelf');
+  const nearShelf = shelfO && Math.hypot(M.x - (shelfO.sx || shelfO.x), M.y - (shelfO.sy || shelfO.y)) < 70;
+  const reading = M.action === 'shelf' && !M.moving && nearShelf;
   let im;
   if(reading){
     im = img('act_read');
@@ -293,7 +298,7 @@ function drawHer(now){
   // 贴到浴室那道竖墙也算遮挡（范围收窄，避免站在地上就被虚化）
   const wallHit = (hb.x + hb.w > 436 && hb.x < 532 && hb.y + hb.h > 300 && hb.y < 700);
   ctx.globalAlpha = (covered > 0.12 || wallHit) ? 0.55 : 1;
-  const flip = (M.view === 'side' && M.face > 0) ? -1 : 1;
+  const flip = (M.view === 'side') ? (M.sideFlip || 1) : 1;   // 侧面方向是稳定的，不逐帧翻
   ctx.translate(M.x, M.y - bob);
   ctx.scale(flip, 1);
   ctx.drawImage(im, -w/2, -h, w, h);
@@ -536,7 +541,10 @@ function setViewByDir(dx, dy, now){
   else want = dy < 0 ? 'back' : 'front';
   if(want === M.view){ M.candView = want; return; }
   if(M.candView !== want){ M.candView = want; M.candSince = now; return; }
-  if(now - (M.candSince || 0) > 450){ M.view = want; }
+  if(now - (M.candSince || 0) > 900){
+    M.view = want;
+    if(want === 'side') M.sideFlip = (dx >= 0 ? -1 : 1);   // 朝右走镜像，朝左走用原图
+  }
 }
 
 /* 卡住检测：想走但位置没变 → 放弃这个目标 */
@@ -555,6 +563,18 @@ function stuckCheck(now){
 }
 
 function step(now, dt){
+  // 原地打转检测：1.5 秒内位移不到 3 像素就放弃当前目标（宁可停下也别晃）
+  if(M.moving){
+    const moved = Math.hypot(M.x - (M.px ?? M.x), M.y - (M.py ?? M.y));
+    if(moved < 3){
+      if(!M.spinSince) M.spinSince = now;
+      else if(now - M.spinSince > 1500){
+        PATH = null; M.target = null; M.moving = false; M.spinSince = 0;
+      }
+    } else {
+      M.px = M.x; M.py = M.y; M.spinSince = 0;
+    }
+  } else { M.px = M.x; M.py = M.y; M.spinSince = 0; }
   // 一旦发现她在可走区域外（越过边界/坐标异常），立刻拉回最近的合法位置
   if(!canGo(M.x, M.y) && now - (M.lastSnap || 0) > 400){
     const keep = M.target;                 // 别忘了她本来要去哪
@@ -592,7 +612,7 @@ function step(now, dt){
     if(Math.hypot(ddx, ddy) < 12){ PATH_I++; }
     else {
       M.moving = true;
-      const st = Math.min(Math.hypot(ddx, ddy), 4);      // 每帧固定 4 像素，不依赖时间
+      const st = Math.min(Math.hypot(ddx, ddy), Math.max(1.5, Math.min(6, M.speed * dt)));   // 按时间走，但限速防帧率影响
       const nx = M.x + ddx / Math.hypot(ddx, ddy) * st;
       const ny = M.y + ddy / Math.hypot(ddx, ddy) * st;
       if(canGo(nx, ny)){
@@ -603,12 +623,17 @@ function step(now, dt){
         M.y = ny;                       // 再只走纵向
       } else {
         // 真的过不去：重算一次路径，还不行才放弃
-        const rep = findPath({ x: M.x, y: M.y }, M.target || wp);
-        if(rep && rep.length > 1){ PATH = rep; PATH_I = 0; }
-        else { PATH = null; M.target = null; M.moving = false; }
+        // 被挡住：先原地停 0.6 秒（别再每 400ms 重算，来回抖就是它造成的）
+        if(now - (M.lastRepath || 0) > 600){
+          M.lastRepath = now;
+          M.moving = false;
+          const rep = findPath({ x: M.x, y: M.y }, M.target || wp);
+          if(rep && rep.length > 1){ PATH = rep; PATH_I = 0; }
+          else { PATH = null; M.target = null; }
+        }
         return;
       }
-      if(Math.abs(ddx) > 3) M.face = ddx > 0 ? 1 : -1;
+      if(Math.abs(ddx) > 8) M.face = ddx > 0 ? 1 : -1;
       setViewByDir(M.target ? M.target.x - M.x : ddx, M.target ? M.target.y - M.y : ddy, now);
       return;
     }
@@ -616,7 +641,8 @@ function step(now, dt){
   if(!M.target){ M.moving = false; return; }
   const dx = M.target.x - M.x, dy = M.target.y - M.y;
   const d = Math.hypot(dx, dy);
-  if(d < 10){
+  const arriveR = M.action ? 60 : 10;   // 有动作时放宽：差一点也算到，否则永远不触发姿势
+  if(d < arriveR){
     M.moving = false; M.target = null; PATH = null; M.idleAt = performance.now();
     if(blocked(M.x, M.y)){ const q = nearestInside(M.x, M.y); M.x = q.x; M.y = q.y; }
     return;
@@ -713,6 +739,7 @@ cv.addEventListener('mousemove', (e) => {
 });
 
 cv.addEventListener('click', (e) => {
+  M.userMoved = true;      // 用户接管过就不再自动恢复位置
   // 手动操作优先：取消正在执行的行程
   routeQueue.length = 0; clearTimeout(routeTimer);
   if(EDIT || (typeof ZONE !== 'undefined' && ZONE)) return;   // 编辑/圈区域时不触发游戏
@@ -749,9 +776,22 @@ cv.addEventListener('click', (e) => {
     const b = hitBox(o, tex);
     if(px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h){
       if(o.wet){
-        if(o.stage === 0){ o.stage = 1; M.action = null; return; }      // 空 → 放水
-        if(o.stage === 1){ o.stage = 2; M.action = o.id; setTarget({ x:o.x, y: b.y + b.h + 30 }); return; }  // 有水 → 她进去
-        o.stage = 0; M.action = null; return;                          // 洗完 → 排空
+        if(o.stage === 0){
+          o.stage = 1; M.action = null;
+          send(API + '/events', { type:'furniture', id:o.id, name:o.label || o.id, intent:'放水', x:Math.round(M.x), y:Math.round(M.y) });
+          return;
+        }
+        if(o.stage === 1){
+          o.stage = 2; M.action = o.id;
+          let d2 = { x:(o.sx != null ? o.sx : o.x), y:(o.sy != null ? o.sy : o.y + 50) };
+          if(!gridWalkable(d2.x, d2.y)) d2 = nearestInside(d2.x, d2.y);
+          setTarget(d2);
+          send(API + '/events', { type:'furniture', id:o.id, name:o.label || o.id, intent:'进缸洗', x:Math.round(M.x), y:Math.round(M.y) });
+          return;
+        }
+        o.stage = 0; M.action = null;
+        send(API + '/events', { type:'furniture', id:o.id, name:o.label || o.id, intent:'排空', x:Math.round(M.x), y:Math.round(M.y) });
+        return;
       }
       M.action = o.id;
       let dest = { x:o.x, y: b.y + b.h + 30 };
@@ -810,11 +850,11 @@ setInterval(async () => {
     const st = await (await fetch(API + '/state', { cache:'no-store' })).json();
     const was = M.sleeping;
     M.sleeping = !!st.sleeping;
-    if(M.sleeping && !was){
+    if(false && M.sleeping && !was){   // 关掉自动上床（点床就够，自动那套会自己造一个走不到的目标）
       const bed = FURN.find(o => o.id === 'bed');
       if(bed){ M.action = 'bed'; M.target = { x: bed.x, y: bed.y + 40 }; }
     }
-    if(!M.sleeping && M.action === 'bed') M.action = null;
+    // 点床等于躺下，和睡眠开关是两件事，不再因为没在睡就把她叫起来
   }catch(e){}
 }, 1200);
 
@@ -963,16 +1003,23 @@ if(!ZONE) /* 启动：从服务端取回上一次的位置 */
 (async () => {
   try{
     const st = await (await fetch(API + '/state', { cache:'no-store' })).json();
-    if(st && Number.isFinite(st.x) && Number.isFinite(st.y)){
+    if(false && !M.userMoved && st && Number.isFinite(st.x) && Number.isFinite(st.y)){   // 位置恢复已关闭
       const p = nearestInside(st.x, st.y);
       M.x = p.x; M.y = p.y;
     }
     if(st && st.sleeping){
       const bed = FURN.find(o => o.id === 'bed');
-      if(bed){ M.action = 'bed'; M.target = { x:bed.x, y:bed.y + 40 }; }
+      if(bed){
+        M.action = 'bed';
+        let d = { x:(bed.sx != null ? bed.sx : bed.x), y:(bed.sy != null ? bed.sy : bed.y + 50) };
+        if(!gridWalkable(d.x, d.y)) d = nearestInside(d.x, d.y);
+        setTarget(d);
+      }
     }
   }catch(e){}
+  HER_READY = true;
 })();
+setTimeout(() => { HER_READY = true; }, 700);   // 兜底：网络再慢也别等太久
 
 buildGrid();
 

@@ -50,7 +50,9 @@ const hud = document.getElementById('hud');
 const bubbleEl = document.getElementById('bubble');
 const nightEl = document.getElementById('night');
 
-const DPR = Math.min(2, window.devicePixelRatio || 1);
+// 默认 1 倍渲染（2 倍是 4 倍填充量，桌宠那种轻量感就靠这个）
+const DPR_MAX = Math.max(1, Math.min(2, Number(new URLSearchParams(location.search).get('dpr')) || 1));
+const DPR = Math.min(DPR_MAX, window.devicePixelRatio || 1);
 cv.width = IMG_W * DPR; cv.height = IMG_H * DPR;
 cv.style.width = IMG_W + 'px'; cv.style.height = IMG_H + 'px';
 function fitCanvas(){
@@ -64,9 +66,28 @@ function resetT(){ ctx.setTransform(DPR,0,0,DPR,0,0); ctx.imageSmoothingEnabled 
 
 /* ---------- 素材 ---------- */
 const IMGS = {};
+/* 有缩略图就用缩略图（体积小 20 倍），没有再退回原图 */
+const HAS_SMALL = new Set(['bed_empty','fridge_empty','pcdesk_empty','table_empty','shelf',
+  'tub_empty','tub_water','sink','toilet','act_bed','act_pc','act_eat','act_bath','act_wash','act_read']);
+
 function img(name){
-  if(!IMGS[name]){ const i = new Image(); i.src = ASSET + name + '.png?v=' + ASSET_V; IMGS[name] = i; }
+  if(!IMGS[name]){
+    const i = new Image();
+    const file = HAS_SMALL.has(name) ? name + '_s' : name;
+    i.src = ASSET + file + '.png?v=' + ASSET_V;
+    IMGS[name] = i;
+  }
   return IMGS[name];
+}
+
+/* 启动时就把所有会用到的图取下来，避免"走到跟前才加载、闪一下" */
+function preloadFurniture(){
+  for(const o of FURN){
+    if(o.tex) img(o.tex);
+    if(o.act) img(o.act);
+    if(o.wet) img(o.wet);
+  }
+  img('act_read');
 }
 const BASE = img('base_room');
 const HER_VIEWS = {};
@@ -77,7 +98,7 @@ function herImg(name){
 
 /* ---------- 家具（像素坐标，锚点 = 脚下中心） ---------- */
 const FURN = [
-  { id:'bed',    tex:'bed_empty',    act:'act_bed',  actScale:1.15, sx:600, sy:430, x:631, y:292, w:175, label:'床' },
+  { id:'bed',    tex:'bed_empty',    act:'act_bed',  actScale:1.15, actOffX:0, actOffY:21, sx:640, sy:330, x:631, y:292, w:175, label:'床' },
   { id:'fridge', tex:'fridge_empty', act:null,       x:500, y:326, w:80,  label:'冰箱' },
   { id:'pcdesk', tex:'pcdesk_empty', act:'act_pc',   actScale:1.15, sx:790, sy:430, x:807, y:346, w:140, label:'电脑桌' },
   { id:'table',  tex:'table_empty',  act:'act_eat',  actScale:1.35, sx:686, sy:530, x:686, y:446, w:130, label:'餐桌' },
@@ -204,23 +225,71 @@ function preloadViews(){
   for(const n of names) herImg(n);
 }
 preloadViews();
+preloadFurniture();
+
+
+/* ---------- 性能：离屏缓存 ---------- */
+let BGC = null;                  // 背景 + 屋子，只画一次
+const SPR = new Map();           // 贴图按目标尺寸缓存
+let lastSig = '';                // 上一次画面的状态指纹
+
+function spriteOf(img, w, h) {
+  const w2 = Math.max(1, Math.round(w)), h2 = Math.max(1, Math.round(h));
+  const key = (img.src || '') + '|' + w2 + 'x' + h2;
+  let c = SPR.get(key);
+  if (!c) {
+    c = document.createElement('canvas');
+    c.width = w2; c.height = h2;
+    c.getContext('2d').drawImage(img, 0, 0, w2, h2);
+    SPR.set(key, c);
+  }
+  return c;
+}
+
+function buildBackdrop() {
+  if (!BASE.complete || !BASE.naturalWidth) return null;
+  const c = document.createElement('canvas');
+  c.width = cv.width; c.height = cv.height;
+  const g = c.getContext('2d');
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  const dpr = cv.width / IMG_W;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const grad = g.createRadialGradient(IMG_W*0.5, IMG_H*0.46, IMG_H*0.15,
+                                      IMG_W*0.5, IMG_H*0.46, IMG_W*0.78);
+  grad.addColorStop(0, '#232a36');
+  grad.addColorStop(0.55, '#161b25');
+  grad.addColorStop(1, '#0a0d13');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, IMG_W, IMG_H);
+  g.drawImage(BASE, 0, 0, IMG_W, IMG_H);
+  return c;
+}
 
 function draw(now){
+  // 静止时跳过重画（省电也省卡）
+  const sig = [Math.round(M.x), Math.round(M.y), M.view, M.action, M.sleeping,
+               bubble.text, bubble.until > now ? 1 : 0, PATH ? PATH.length : 0,
+               M.action, Math.round(bubble.id || 0),
+               Math.round(now / (M.sleeping ? 0 : M.moving ? 16 : 125)) || 0].join(',');   // 睡着不重画
+  if (sig === lastSig) return;
+  lastSig = sig;
+
   resetT();
   ctx.globalAlpha = 1;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, cv.width, cv.height);
   resetT();
-  if(!BG_GRAD){
-    BG_GRAD = ctx.createRadialGradient(IMG_W*0.5, IMG_H*0.46, IMG_H*0.15,
-                                       IMG_W*0.5, IMG_H*0.46, IMG_W*0.78);
-    BG_GRAD.addColorStop(0, '#232a36');
-    BG_GRAD.addColorStop(0.55, '#161b25');
-    BG_GRAD.addColorStop(1, '#0a0d13');
+  if(!BGC && BASE.complete) BGC = buildBackdrop();
+  if(BGC){
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(BGC, 0, 0);
+    ctx.restore();
   }
-  ctx.fillStyle = BG_GRAD; ctx.fillRect(0,0,IMG_W,IMG_H);
 
-  if(BASE.complete && BASE.naturalWidth) ctx.drawImage(BASE, 0, 0, IMG_W, IMG_H);
+  // 背景已整张画在 BGC 里，这里不再填充
+
+  // 屋子已画在离屏背景里
 
   // 家具：按 y 排序，她插在中间
   const items = FURN.map(o => ({ kind:'f', o, y:o.y })).concat([{ kind:'her', y:M.y }]);
@@ -241,15 +310,34 @@ function draw(now){
     if(!im.complete || !im.naturalWidth) continue;
     const w = o.w * scale;
     const h = w * im.naturalHeight / im.naturalWidth;
-    ctx.drawImage(im, o.x - w/2 + offX, o.y - h + offY, w, h);
+    ctx.drawImage(spriteOf(im, w, h), o.x - w/2 + offX, o.y - h + offY);
   }
 
   // 睡着
+    // 躺在床上 6 秒 → 真的睡着（关灯、冒 zz）
+  if(!M.sleeping && M.action === 'bed' && !M.moving){
+    if(!M.bedSince) M.bedSince = now;
+    else if(now - M.bedSince > 6000){
+      M.sleeping = true;
+      send(API + '/sleep', { on: true });
+    }
+  } else if(M.action !== 'bed'){
+    M.bedSince = 0;
+  }
   nightEl.style.opacity = M.sleeping ? 0.42 : 0;
   if(M.sleeping && M.action === 'bed' && !M.moving){
+    // zz 要冒在"床上那张图"的头部，而不是她站立的位置
+    const bo = FURN.find(o => o.id === 'bed');
+    const bim = img(bo.act);
+    const bsc = bo.actScale || 1;
+    const bw = bo.w * bsc, bh = bw * (bim.naturalHeight || 1) / (bim.naturalWidth || 640);
+    const bx = bo.x - bw/2 + (bo.actOffX || 0), by = bo.y - bh + (bo.actOffY || 0);
     ctx.fillStyle = '#9fc0ea';
     ctx.font = 'bold 20px system-ui';
-    ctx.fillText('z z', M.x + 26, M.y - HER_H_PX);
+    const t = (now % 2400) / 2400;
+    ctx.globalAlpha = 0.35 + 0.6 * Math.abs(Math.sin(t * Math.PI * 2));
+    ctx.fillText('z z', bx + bw * 0.62, by + bh * 0.16 - t * 6);
+    ctx.globalAlpha = 1;
   }
 
   // 气泡
@@ -296,7 +384,8 @@ function drawHer(now){
   const h = HER_H_PX;
   const w = h * (im.width / im.naturalHeight);
   ctx.save();
-  const bob = M.moving ? Math.sin(now / 240) * 2.5 : 0;   // 走路时轻微起伏
+  const bob = M.moving ? Math.sin(now / 240) * 2.5            // 走路：快一点的起伏
+            : Math.sin(now / 320) * 2.2;                      // 站着：约 2 秒一次呼吸
   // 被前面的家具挡住时半透明（看起来像在后面，不是被切断）
   const hb = { x: M.x - w/2, y: M.y - h, w: w, h: h };
   let covered = 0;
@@ -313,7 +402,7 @@ function drawHer(now){
   const flip = (dirView === 'side') ? dirFlip : 1;
   ctx.translate(M.x, M.y - bob);
   ctx.scale(flip, 1);
-  ctx.drawImage(im, -w/2, -h, w, h);
+  ctx.drawImage(spriteOf(im, w, h), -w/2, -h);
   ctx.restore();
 }
 
@@ -747,6 +836,36 @@ cv.addEventListener('mousemove', (e) => {
 
 cv.addEventListener('click', (e) => {
   M.userMoved = true;      // 用户接管过就不再自动恢复位置
+  if(M.sleeping){
+    const rr = cv.getBoundingClientRect();
+    const px2 = (e.clientX - rr.left) * (IMG_W / rr.width);
+    const py2 = (e.clientY - rr.top) * (IMG_H / rr.height);
+    const hb = herRect();
+    let onHer = px2 > hb.x && px2 < hb.x + hb.w && py2 > hb.y - 80 && py2 < hb.y + hb.h;
+    // 睡着时她是被动作图盖住的：判断点是否落在"床上那张图"的范围里
+    const so = FURN.find(o => o.id === M.action && o.act);
+    if(!onHer && so){
+      const sim = img(so.act);
+      const ssc = so.actScale || 1;
+      const sw = so.w * ssc, sh = sw * (sim.naturalHeight || 1) / (sim.naturalWidth || 640);
+      const sx0 = so.x - sw/2 + (so.actOffX || 0), sy0 = so.y - sh + (so.actOffY || 0);
+      onHer = px2 > sx0 && px2 < sx0 + sw && py2 > sy0 && py2 < sy0 + sh;
+    }
+    if(!onHer) return;                       // 睡着时点别处没反应
+    M.sleeping = false;                      // 点她 = 叫醒
+    M.action = null; M.target = null; PATH = null; M.moving = false;
+    const bo2 = FURN.find(o => o.id === 'bed');
+    if(bo2){                                 // 醒来固定站在床边
+      const wx = (bo2.sx != null ? bo2.sx : bo2.x);
+      const wy = (bo2.sy != null ? bo2.sy : bo2.y + 50);
+      M.x = wx; M.y = wy;
+    }
+    M.view = 'front';
+    send(API + '/sleep', { on: false });
+    // 也让对话那边知道她醒了
+    send(API + '/events', { type:'touch', x:Math.round(px2), y:Math.round(py2), note:'把她叫醒了' });
+    return;
+  }
   // 手动操作优先：取消正在执行的行程
   routeQueue.length = 0; clearTimeout(routeTimer);
   if(EDIT || (typeof ZONE !== 'undefined' && ZONE)) return;   // 编辑/圈区域时不触发游戏
@@ -1040,6 +1159,7 @@ if(ACT_TUNE){
   panel.style.cssText = 'position:fixed;right:12px;top:12px;background:#111a2a;color:#cfe2f7;padding:12px 14px;border-radius:10px;font:13px/1.7 monospace;z-index:99;white-space:pre';
   document.body.appendChild(panel);
   const refresh = () => {
+    lastSig = '';   // 强制下一帧重画（否则拖了看不出变化）
     panel.textContent = '动作图微调：' + ACT_TUNE + '\n拖动=改偏移   滚轮=缩放\n' +
       '偏移 x:' + Math.round(target.actOffX || 0) + '  y:' + Math.round(target.actOffY || 0) +
       '\n缩放 ' + (target.actScale || 1).toFixed(2) + '\n（松手自动复制）';
@@ -1051,15 +1171,23 @@ if(ACT_TUNE){
     return { x:(e.clientX - r.left) * (IMG_W / r.width), y:(e.clientY - r.top) * (IMG_H / r.height) };
   };
   cv.addEventListener('mousedown', (e) => {
+    // 画布任意处按下就能拖（不再要求点中图）
     const p = toImgPt(e);
-    const im = img(target.act);
-    const sc = target.actScale || 1;
-    const w = target.w * sc, h = w * (im.naturalHeight || 1) / (im.naturalWidth || 1);
-    const x0 = target.x - w/2 + (target.actOffX || 0), y0 = target.y - h + (target.actOffY || 0);
-    if(p.x > x0 && p.x < x0 + w && p.y > y0 && p.y < y0 + h){
-      dragging = true;
-      off = { x: p.x - (target.actOffX || 0), y: p.y - (target.actOffY || 0) };
-    }
+    dragging = true;
+    off = { x: p.x - (target.actOffX || 0), y: p.y - (target.actOffY || 0) };
+    e.preventDefault();
+  });
+
+  // 方向键微调：±1px，按住 Shift 每次 10px
+  window.addEventListener('keydown', (e) => {
+    const d = e.shiftKey ? 10 : 1;
+    if (e.key === 'ArrowLeft') target.actOffX = Math.round((target.actOffX || 0) - d);
+    else if (e.key === 'ArrowRight') target.actOffX = Math.round((target.actOffX || 0) + d);
+    else if (e.key === 'ArrowUp') target.actOffY = Math.round((target.actOffY || 0) - d);
+    else if (e.key === 'ArrowDown') target.actOffY = Math.round((target.actOffY || 0) + d);
+    else return;
+    e.preventDefault();
+    refresh();
   });
   window.addEventListener('mousemove', (e) => {
     if(!dragging) return;

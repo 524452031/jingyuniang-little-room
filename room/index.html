@@ -75,13 +75,13 @@ function herImg(name){
 
 /* ---------- 家具（像素坐标，锚点 = 脚下中心） ---------- */
 const FURN = [
-  { id:'bed',    tex:'bed_empty',    act:'act_bed',  actScale:1.15, x:631, y:292, w:175, label:'床' },
+  { id:'bed',    tex:'bed_empty',    act:'act_bed',  actScale:1.15, sx:620, sy:400, x:631, y:292, w:175, label:'床' },
   { id:'fridge', tex:'fridge_empty', act:null,       x:500, y:326, w:80,  label:'冰箱' },
-  { id:'pcdesk', tex:'pcdesk_empty', act:'act_pc',   actScale:1.15, x:807, y:346, w:140, label:'电脑桌' },
-  { id:'table',  tex:'table_empty',  act:'act_eat',  actScale:1.35, x:686, y:446, w:130, label:'餐桌' },
+  { id:'pcdesk', tex:'pcdesk_empty', act:'act_pc',   actScale:1.15, sx:790, sy:430, x:807, y:346, w:140, label:'电脑桌' },
+  { id:'table',  tex:'table_empty',  act:'act_eat',  actScale:1.35, sx:686, sy:530, x:686, y:446, w:130, label:'餐桌' },
   { id:'shelf',  tex:'shelf',        act:null,       x:998, y:418, w:100, label:'书架' },
-  { id:'tub',    tex:'tub_empty',    act:'act_bath', wet:'tub_water', stage:0, actScale:0.95, x:109, y:540, w:180, label:'浴缸' },
-  { id:'sink',   tex:'sink',         act:'act_wash', actScale:1.35, actOffX:-17, actOffY:-6, x:286, y:469, w:90,  label:'洗漱台' },
+  { id:'tub',    tex:'tub_empty',    act:'act_bath', wet:'tub_water', stage:0, actScale:0.95, sx:190, sy:610, x:109, y:540, w:180, label:'浴缸' },
+  { id:'sink',   tex:'sink',         act:'act_wash', actScale:1.35, actOffX:-17, actOffY:-6, sx:300, sy:545, x:286, y:469, w:90,  label:'洗漱台' },
   { id:'toilet', tex:'toilet',       act:null,       x:457, y:578, w:100, label:'马桶' }
 ];
 
@@ -150,19 +150,25 @@ function nearestInside(x, y){
 }
 
 /* 站在这里行不行：查补过缝的网格，而不是原始多边形 */
+
+/* 能不能站这儿：只看在地板多边形里和没压在家具上两件事 */
+function canGo(x, y){
+  // 多边形 或 网格 任一说可走就放行（网格补过缝，比多边形宽松一点）
+  if(inAnyWalk(x, y)) return true;
+  if(!GRID) return false;
+  return walkable(Math.floor(x / CELL), Math.floor(y / CELL));
+}
+
 function gridWalkable(x, y){
   if(!GRID) return inAnyWalk(x, y);
-  return walkable(Math.round(x / CELL), Math.round(y / CELL));
+  return walkable(Math.floor(x / CELL), Math.floor(y / CELL));
 }
 
 function blocked(x, y){
-  if(!gridWalkable(x, y)) return true;
-  for(const o of FURN){
-    const f = footRect(o);
-    if(x > f.x && x < f.x + f.w && y > f.y && y < f.y + f.h) return true;
-  }
-  return false;
+  // 唯一判定：能不能站（多边形 或 补过缝的网格）
+  return !canGo(x, y);
 }
+
 
 
 /* ---------- 绘制 ---------- */
@@ -249,7 +255,7 @@ function draw(now){
     bubbleEl.style.display = 'none';
   }
 
-  const cellOk = GRID ? walkable(Math.round(M.x/CELL), Math.round(M.y/CELL)) : false;
+  const cellOk = GRID ? walkable(Math.floor(M.x/CELL), Math.floor(M.y/CELL)) : false;
   hud.textContent = '格 ' + (cellOk ? '可走' : '不可走') + '  路径 ' + (PATH ? PATH.length : 0) + '  格总数 ' + (GRID ? GRID.reduce((a,b)=>a+b,0) : -1) + '\n' +
     '位置 ' + Math.round(M.x) + ',' + Math.round(M.y) +
     '   状态 ' + (M.sleeping ? '睡着' : M.moving ? '在走' : '待着') +
@@ -374,7 +380,7 @@ function buildGrid(){
 }
 
 
-function cellOf(p){ return { gx: Math.max(0, Math.min(GW-1, Math.round(p.x / CELL))), gy: Math.max(0, Math.min(GH-1, Math.round(p.y / CELL))) }; }
+function cellOf(p){ return { gx: Math.max(0, Math.min(GW-1, Math.floor(p.x / CELL))), gy: Math.max(0, Math.min(GH-1, Math.floor(p.y / CELL))) }; }
 function centerOf(gx, gy){ return { x: gx * CELL + CELL/2, y: gy * CELL + CELL/2 }; }
 function walkable(gx, gy){
   if(gx < 0 || gy < 0 || gx >= GW || gy >= GH) return false;
@@ -550,10 +556,12 @@ function stuckCheck(now){
 
 function step(now, dt){
   // 一旦发现她在可走区域外（越过边界/坐标异常），立刻拉回最近的合法位置
-  if(!gridWalkable(M.x, M.y) && now - (M.lastSnap || 0) > 400){
-    PATH = null; M.target = null; M.moving = false;
+  if(!canGo(M.x, M.y) && now - (M.lastSnap || 0) > 400){
+    const keep = M.target;                 // 别忘了她本来要去哪
     const q = nearestInside(M.x, M.y);
     M.x = q.x; M.y = q.y; M.lastSnap = now;
+    PATH = null; M.moving = false;
+    if(keep) setTarget(keep); else M.target = null;
   }
   // stuckCheck 暂时不启用（会和目标争夺，先保证点击能走）
   // 自己走：空闲且没在做事时，到点就挑个点走过去
@@ -584,14 +592,14 @@ function step(now, dt){
     if(Math.hypot(ddx, ddy) < 12){ PATH_I++; }
     else {
       M.moving = true;
-      const st = Math.min(Math.hypot(ddx, ddy), M.speed * dt);
+      const st = Math.min(Math.hypot(ddx, ddy), 4);      // 每帧固定 4 像素，不依赖时间
       const nx = M.x + ddx / Math.hypot(ddx, ddy) * st;
       const ny = M.y + ddy / Math.hypot(ddx, ddy) * st;
-      if(gridWalkable(nx, ny)){
+      if(canGo(nx, ny)){
         M.x = nx; M.y = ny;
-      } else if(gridWalkable(nx, M.y)){
+      } else if(canGo(nx, M.y)){
         M.x = nx;                       // 先只走横向（贴着边蹭过去）
-      } else if(gridWalkable(M.x, ny)){
+      } else if(canGo(M.x, ny)){
         M.y = ny;                       // 再只走纵向
       } else {
         // 真的过不去：重算一次路径，还不行才放弃
@@ -614,23 +622,50 @@ function step(now, dt){
     return;
   }
   M.moving = true;
-  const s = Math.min(d, M.speed * dt);
+  const s = Math.min(d, 4);                          // 每帧固定 4 像素
   const nx = M.x + dx/d*s, ny = M.y + dy/d*s;
-  if(!blocked(nx, M.y)) M.x = nx;
-  if(!blocked(M.x, ny)) M.y = ny;
+  if(canGo(nx, M.y)) M.x = nx;
+  if(canGo(M.x, ny)) M.y = ny;
   if(Math.abs(dx) > 2) M.face = dx > 0 ? 1 : -1;
   // 朝向由移动方向决定，这里不再强制正面
 }
 
 let RAF_ON = false;
 function tick(now){
-  const dt = Math.min(0.08, (now - last)/1000);
+  const dt = Math.min(0.08, Math.max(0.008, (now - last)/1000));
   last = now;
   step(now, dt);
   draw(now);
   drawDebug(now);
   if(STATIC_FRAME) return;
-  requestAnimationFrame(tick);
+  
+/* 她“看视频”：服务端 /api/video 有新的就弹一张小卡片 */
+let lastVideoId = -1, videoCard = null;
+function showVideoCard(v){
+  if(!videoCard){
+    videoCard = document.createElement('div');
+    videoCard.style.cssText = 'position:fixed;right:18px;bottom:18px;max-width:280px;padding:12px 14px;' +
+      'border-radius:12px;background:#121a28ee;color:#d6e4f5;font-size:13px;line-height:1.6;' +
+      'box-shadow:0 8px 24px #0008;border:1px solid #2b3a52;';
+    document.body.appendChild(videoCard);
+  }
+  videoCard.innerHTML = '<div style="color:#7fb2ff;margin-bottom:4px">在看</div>' +
+    '<div style="font-weight:600;margin-bottom:6px">' + (v.title || v.bvid || '') + '</div>' +
+    '<div style="opacity:.85">' + (v.note || '') + '</div>';
+  videoCard.style.display = 'block';
+}
+setInterval(async () => {
+  if(!API) return;
+  try{
+    const v = await (await fetch(API + '/video', { cache:'no-store' })).json();
+    if(v && v.id && v.id !== lastVideoId){
+      lastVideoId = v.id;
+      showVideoCard(v);
+    }
+  }catch(e){}
+}, 4000);
+
+requestAnimationFrame(tick);
 }
 
 /* 读我排的行程：服务端 /api/route 有新的 points 就依次走过去 */
@@ -700,7 +735,9 @@ cv.addEventListener('click', (e) => {
     if(px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h){
       showFridge();
       M.action = null;
-      setTarget({ x: fr.x, y: b.y + b.h + 30 });
+      let dest = { x: fr.x, y: b.y + b.h + 30 };
+      if(!gridWalkable(dest.x, dest.y)) dest = nearestInside(dest.x, dest.y);
+      setTarget(dest);
       send(API + '/events', { type:'furniture', id:'fridge', name:'冰箱', intent:'看余额', x:Math.round(M.x), y:Math.round(M.y) });
       return;
     }
@@ -717,7 +754,9 @@ cv.addEventListener('click', (e) => {
         o.stage = 0; M.action = null; return;                          // 洗完 → 排空
       }
       M.action = o.id;
-      setTarget({ x:o.x, y: b.y + b.h + 30 });     // 站到它正前方
+      let dest = { x:o.x, y: b.y + b.h + 30 };
+      if(!gridWalkable(dest.x, dest.y)) dest = nearestInside(dest.x, dest.y);
+      setTarget(dest);     // 站到它正前方
       send(API + '/events', { type:'furniture', id:o.id, name:o.label || o.id, intent:'', x:Math.round(M.x), y:Math.round(M.y) });
       return;
     }

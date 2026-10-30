@@ -32,8 +32,8 @@ window.onerror = function(msg, src, line, col){
 
 const ROOM_ID = (location.pathname.match(/^\/room\/([a-zA-Z0-9_-]+)/) || [])[1] || 'main';
 /* 两种跑法：
-   1) 挂在服务端上：/room/<房号>  → 素材走 /room/<房号>/obj/
-   2) 静态托管：直接用文件  → 素材走 ./assets/room/
+   1) 挂在服务端：/room/<房号>     → 素材走 /room/<房号>/obj/
+   2) 静态托管：直接用文件          → 素材走 ./assets/room/
    静态模式下没有后端，位置/说话等接口会静默失败，画面照常。 */
 const STANDALONE = !/^\/room\/[a-zA-Z0-9_-]+/.test(location.pathname);
 const API = STANDALONE ? '' : '/room/' + ROOM_ID + '/api';
@@ -69,7 +69,7 @@ function img(name){
 const BASE = img('base_room');
 const HER_VIEWS = {};
 function herImg(name){
-  if(!HER_VIEWS[name]){ const i = new Image(); i.src = VIEW_DIR + name + '.png?v=' + ASSET_V; HER_VIEWS[name] = i; }
+  if(!HER_VIEWS[name]){ const i = new Image(); i.src = VIEW_DIR + name + '.png'; HER_VIEWS[name] = i; }
   return HER_VIEWS[name];
 }
 
@@ -90,7 +90,9 @@ function footRect(o){ return { x:o.x - o.w*0.26, y:o.y - 12, w:o.w*0.52, h:22 };
 
 /* ---------- 她 ---------- */
 const M = { x:700, y:480, face:1, moving:false, view:'front', sleeping:false, action:null, target:null, speed:230 };
-const HER_W = Number(new URLSearchParams(location.search).get('her')) || 85;
+const STATIC_FRAME = new URLSearchParams(location.search).get('static') === '1';   // ?static=1 只画一帧
+const NO_WALKFRAMES = new URLSearchParams(location.search).get('walk') !== '1';   // 默认用站立图+轻微起伏，?walk=1 才用走路帧   // ?walk=0 关掉走路帧
+const HER_H_PX = Number(new URLSearchParams(location.search).get('herh')) || 112;   // 统一身高，?herh= 可调
 
 function herRect(){ return { x:M.x-16, y:M.y-26, w:32, h:28 }; }
 
@@ -107,7 +109,7 @@ function drawnBox(o, texName){
 const WALL_BOX = { x: 436, y: 300, w: 96, h: 400 };   // 只框那道竖着的墙
 
 /* 可走区域：人肉圈出来的九块（2026-10-30 晚） */
-const WALK_POLYS = [[[243,458],[412,558],[270,648],[105,564]],[[294,487],[348,456],[414,492],[386,537]],[[355,372],[351,451],[414,486],[408,343]],[[514,332],[589,296],[645,327],[591,371]],[[545,368],[545,523],[602,550],[607,390]],[[630,440],[620,556],[790,661],[912,588]],[[686,467],[859,343],[1137,482],[934,592]],[[709,315],[793,378],[822,354],[732,301]],[[630,291],[712,256],[712,284],[659,316]],[[400,450],[535,470],[535,520],[400,500]]];   // 最后一块是门口
+const WALK_POLYS = [[[243,458],[412,558],[270,648],[105,564]],[[294,487],[348,456],[414,492],[386,537]],[[355,372],[351,451],[414,486],[408,343]],[[514,332],[589,296],[645,327],[591,371]],[[545,368],[545,523],[602,550],[607,390]],[[630,440],[620,556],[790,661],[912,588]],[[686,467],[859,343],[1137,482],[934,592]],[[709,315],[793,378],[822,354],[732,301]],[[630,291],[712,256],[712,284],[659,316]],[[380,430],[575,455],[575,550],[380,525]]];   // 最后一块是门口
 
 function inPoly(px, py, poly){
   let inside = false;
@@ -140,9 +142,14 @@ function nearestInside(x, y){
   return { x:700, y:480 };
 }
 
+/* 站在这里行不行：查补过缝的网格，而不是原始多边形 */
+function gridWalkable(x, y){
+  if(!GRID) return inAnyWalk(x, y);
+  return walkable(Math.round(x / CELL), Math.round(y / CELL));
+}
+
 function blocked(x, y){
-  // 与建网格用同一个判定点：(x, y) 就是脚下那一点
-  if(!inAnyWalk(x, y)) return true;
+  if(!gridWalkable(x, y)) return true;
   for(const o of FURN){
     const f = footRect(o);
     if(x > f.x && x < f.x + f.w && y > f.y && y < f.y + f.h) return true;
@@ -155,9 +162,38 @@ function blocked(x, y){
 let bubble = { text:'', until:0 };
 let BG_GRAD = null;
 
+let dbgEl = null;
+function drawDebug(now){
+  if(!DEBUG_OVERLAY) return;
+  if(!dbgEl){
+    dbgEl = document.createElement('div');
+    dbgEl.style.cssText = 'position:fixed;left:12px;top:12px;background:#000c;color:#8ef;padding:10px 12px;border-radius:8px;font:13px/1.6 monospace;z-index:99;white-space:pre';
+    document.body.appendChild(dbgEl);
+  }
+  dbgEl.textContent =
+    'x=' + M.x.toFixed(1) + '  y=' + M.y.toFixed(1) + '\n' +
+    'view=' + M.view + '  face=' + M.face + '\n' +
+    'moving=' + M.moving + '  target=' + (M.target ? (Math.round(M.target.x)+','+Math.round(M.target.y)) : '无') + '\n' +
+    'path=' + (PATH ? (PATH_I + '/' + PATH.length) : '无') + '\n' +
+    'action=' + (M.action || '无') + '  sleep=' + M.sleeping + '\n' +
+    'blocked=' + blocked(M.x, M.y) + '  auto=' + AUTO + '\n' +
+    'overlap阴影=' + (M.lastCover != null ? M.lastCover.toFixed(2) : '-');
+}
+
+/* 预加载所有朝向与走路帧（否则永远只有正面） */
+function preloadViews(){
+  const names = ['front','side','back'];
+  for(let i = 1; i <= 8; i++){ names.push('walk' + i); names.push('backwalk' + i); }
+  for(const n of names) herImg(n);
+}
+preloadViews();
+
 function draw(now){
   resetT();
-  ctx.clearRect(0,0,IMG_W,IMG_H);
+  ctx.globalAlpha = 1;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  resetT();
   if(!BG_GRAD){
     BG_GRAD = ctx.createRadialGradient(IMG_W*0.5, IMG_H*0.46, IMG_H*0.15,
                                        IMG_W*0.5, IMG_H*0.46, IMG_W*0.78);
@@ -196,7 +232,7 @@ function draw(now){
   if(M.sleeping && M.action === 'bed' && !M.moving){
     ctx.fillStyle = '#9fc0ea';
     ctx.font = 'bold 20px system-ui';
-    ctx.fillText('z z', M.x + 26, M.y - HER_W*1.1);
+    ctx.fillText('z z', M.x + 26, M.y - HER_H_PX);
   }
 
   // 气泡
@@ -207,7 +243,7 @@ function draw(now){
   }
 
   const cellOk = GRID ? walkable(Math.round(M.x/CELL), Math.round(M.y/CELL)) : false;
-  hud.textContent = '格 ' + (cellOk ? '可走' : '不可走') + '  路径 ' + (PATH ? PATH.length : 0) + '  格总数 ' + (GRID ? GRID.reduce((a,b)=>a+b,0) : -1) + '\\n' +
+  hud.textContent = '格 ' + (cellOk ? '可走' : '不可走') + '  路径 ' + (PATH ? PATH.length : 0) + '  格总数 ' + (GRID ? GRID.reduce((a,b)=>a+b,0) : -1) + '\n' +
     '位置 ' + Math.round(M.x) + ',' + Math.round(M.y) +
     '   状态 ' + (M.sleeping ? '睡着' : M.moving ? '在走' : '待着') +
     '   房间 ' + IMG_W + '×' + IMG_H + '\n点地板走过去 · 点她说话 · 点家具做事';
@@ -215,13 +251,24 @@ function draw(now){
 
 function drawHer(now){
   const reading = M.action === 'shelf' && !M.moving;
-  const im = reading ? img('act_read') : (HER_VIEWS[M.view] || HER_VIEWS.front || herImg('front'));
+  let im;
+  if(reading){
+    im = img('act_read');
+  } else if(M.moving && !NO_WALKFRAMES){
+    // 走路帧：背对时用 backwalk，其它用 walk（8 帧循环）
+    const prefix = (M.view === 'back') ? 'backwalk' : 'walk';
+    const idx = 1 + (Math.floor(now / 110) % 8);
+    im = HER_VIEWS[prefix + idx] || HER_VIEWS[prefix + 1] || HER_VIEWS.front || herImg('front');
+  } else {
+    im = HER_VIEWS[M.view] || HER_VIEWS.front || herImg('front');
+  }
   if(!im.complete || !im.naturalWidth) return;
-  const h = HER_W * im.naturalHeight / im.width;
+  const h = HER_H_PX;
+  const w = h * (im.width / im.naturalHeight);
   ctx.save();
-  const bob = M.moving ? Math.sin(now/160)*2 : 0;
+  const bob = M.moving ? Math.sin(now / 240) * 2.5 : 0;   // 走路时轻微起伏
   // 被前面的家具挡住时半透明（看起来像在后面，不是被切断）
-  const hb = { x: M.x - HER_W/2, y: M.y - h, w: HER_W, h: h };
+  const hb = { x: M.x - w/2, y: M.y - h, w: w, h: h };
   let covered = 0;
   for(const o of FURN){
     if(o.y <= M.y) continue;                       // 只算画在她前面的
@@ -230,11 +277,13 @@ function drawHer(now){
     const iy = Math.max(0, Math.min(hb.y+hb.h, ob.y+ob.h) - Math.max(hb.y, ob.y));
     covered = Math.max(covered, (ix*iy) / (hb.w*hb.h));
   }
-  ctx.globalAlpha = covered > 0.25 ? 0.55 : 1;
+  // 贴到浴室那道竖墙也算遮挡（范围收窄，避免站在地上就被虚化）
+  const wallHit = (hb.x + hb.w > 436 && hb.x < 532 && hb.y + hb.h > 300 && hb.y < 700);
+  ctx.globalAlpha = (covered > 0.12 || wallHit) ? 0.55 : 1;
   const flip = (M.view === 'side' && M.face > 0) ? -1 : 1;
   ctx.translate(M.x, M.y - bob);
   ctx.scale(flip, 1);
-  ctx.drawImage(im, -HER_W/2, -h, HER_W, h);
+  ctx.drawImage(im, -w/2, -h, w, h);
   ctx.restore();
 }
 
@@ -251,7 +300,7 @@ function drawBubble(now){
   if(cur) lines.push(cur);
   const lh = 22, tw = Math.max(...lines.map(l => ctx.measureText(l).width));
   const w = Math.min(maxW + 28, tw + 26), h = lines.length*lh + 18;
-  let anchorX = M.x, anchorY = M.y - HER_W*1.25;
+  let anchorX = M.x, anchorY = M.y - HER_H_PX * 1.08;
   const hiddenBy = M.action && !M.moving && ['bed','pcdesk','table','tub','sink'].includes(M.action);
   if(hiddenBy){
     const o = FURN.find(f => f.id === M.action);
@@ -305,25 +354,15 @@ function buildGrid(){
       raw[gy * GW + gx] = ok ? 1 : 0;
     }
   }
-  // 闭运算：先膨胀再腐蚀，把九块之间的窄缝补上（半径 2 格 ≈ 20px）
-  const R = 2;
-  const dil = new Uint8Array(GW * GH);
+  // 只向外扩 1 格（10px）：让贴边的走道能过，但不会漫出地板
+  const R = 1;
+  GRID = new Uint8Array(GW * GH);
   for(let gy = 0; gy < GH; gy++) for(let gx = 0; gx < GW; gx++){
     if(!raw[gy*GW+gx]) continue;
     for(let dy = -R; dy <= R; dy++) for(let dx = -R; dx <= R; dx++){
       const nx = gx+dx, ny = gy+dy;
-      if(nx>=0 && ny>=0 && nx<GW && ny<GH) dil[ny*GW+nx] = 1;
+      if(nx>=0 && ny>=0 && nx<GW && ny<GH) GRID[ny*GW+nx] = 1;
     }
-  }
-  GRID = new Uint8Array(GW * GH);
-  for(let gy = 0; gy < GH; gy++) for(let gx = 0; gx < GW; gx++){
-    if(!dil[gy*GW+gx]) continue;
-    let keep = 1;
-    for(let dy = -R; dy <= R && keep; dy++) for(let dx = -R; dx <= R; dx++){
-      const nx = gx+dx, ny = gy+dy;
-      if(!(nx>=0 && ny>=0 && nx<GW && ny<GH) || !dil[ny*GW+nx]){ keep = 0; break; }
-    }
-    GRID[gy*GW+gx] = keep && raw[gy*GW+gx] ? 1 : (keep ? 1 : 0);
   }
 }
 
@@ -333,6 +372,38 @@ function centerOf(gx, gy){ return { x: gx * CELL + CELL/2, y: gy * CELL + CELL/2
 function walkable(gx, gy){
   if(gx < 0 || gy < 0 || gx >= GW || gy >= GH) return false;
   return GRID[gy * GW + gx] === 1;
+}
+
+
+/* 两点之间能不能直着走（每 6 像素采样一次） */
+function lineFree(a, b){
+  const d = Math.hypot(b.x - a.x, b.y - a.y);
+  const n = Math.max(1, Math.ceil(d / 6));
+  for(let i = 1; i < n; i++){
+    const t = i / n;
+    const x = a.x + (b.x - a.x) * t;
+    const y = a.y + (b.y - a.y) * t;
+    if(!gridWalkable(x, y)) return false;
+    for(const o of FURN){
+      const f = footRect(o);
+      if(x > f.x && x < f.x + f.w && y > f.y && y < f.y + f.h) return false;
+    }
+  }
+  return true;
+}
+
+/* 把 A* 的阶梯路径拉直：能一条直线到就不拐 */
+function smoothPath(path){
+  if(!path || path.length <= 2) return path;
+  const out = [path[0]];
+  let i = 0;
+  while(i < path.length - 1){
+    let j = path.length - 1;
+    for(; j > i + 1; j--){ if(lineFree(path[i], path[j])) break; }
+    out.push(path[j]);
+    i = j;
+  }
+  return out;
 }
 
 function findPath(from, to){
@@ -371,7 +442,7 @@ function findPath(from, to){
         out.push(centerOf(c % GW, Math.floor(c / GW)));
         c = came.get(c);
       }
-      return out.reverse();
+      return smoothPath(out.reverse());
     }
     seen.add(cur);
     const cx = cur % GW, cy = Math.floor(cur / GW);
@@ -394,8 +465,16 @@ function findPath(from, to){
 }
 
 let PATH = null, PATH_I = 0;
+let TARGET_COUNT = 0;
 function setTarget(p){
-  const path = findPath({ x:M.x, y:M.y }, p);
+  TARGET_COUNT++;
+  // 能直线看到目标就直着走（避免 A* 在窄门口绕来绕去）
+  const here = { x: M.x, y: M.y };
+  if(lineFree(here, p)){
+    PATH = [p]; PATH_I = 0; M.target = p; M.path = PATH;
+    return;
+  }
+  const path = findPath(here, p);
   if(!path || !path.length){ PATH = null; M.target = p; return; }   // 兜底：直走
   PATH = path; PATH_I = 0; M.target = path[path.length - 1]; M.path = path;
 }
@@ -416,12 +495,13 @@ function randomWalkPoint(){
     const y = miny + Math.random() * (maxy - miny);
     if(!inPoly(x, y, poly)) continue;
     if(blocked(x, y)) continue;
-    if(Math.hypot(x - M.x, y - M.y) < 90) continue;
+    if(Math.hypot(x - M.x, y - M.y) < 90) continue;   // 太近就不去
     return { x, y };
   }
   return null;
 }
 
+/* 空闲多久之后自己动一次（毫秒，随机区间） */
 let nextWanderAt = 0;
 function scheduleWander(now){
   nextWanderAt = now + 20000 + Math.random() * 20000;   // 20~40 秒
@@ -433,46 +513,78 @@ function setViewByDir(dx, dy, now){
   else want = dy < 0 ? 'back' : 'front';
   if(want === M.view){ M.candView = want; return; }
   if(M.candView !== want){ M.candView = want; M.candSince = now; return; }
-  if(now - (M.candSince || 0) > 180){ M.view = want; }
+  if(now - (M.candSince || 0) > 450){ M.view = want; }
+}
+
+/* 卡住检测：想走但位置没变 → 放弃这个目标 */
+function stuckCheck(now){
+  if(!M.moving){ M.lastX = M.x; M.lastY = M.y; M.stuckSince = 0; return; }
+  const moved = Math.hypot(M.x - (M.lastX ?? M.x), M.y - (M.lastY ?? M.y));
+  if(moved > 0.6){
+    M.lastX = M.x; M.lastY = M.y; M.stuckSince = 0;
+  } else {
+    if(!M.stuckSince) M.stuckSince = now;
+    else if(now - M.stuckSince > 700){
+      PATH = null; M.target = null; M.moving = false; M.stuckSince = 0;
+      nextWanderAt = 0;
+    }
+  }
 }
 
 function step(now, dt){
+  // 一旦发现她在可走区域外（越过边界/坐标异常），立刻拉回最近的合法位置
+  if(!gridWalkable(M.x, M.y) && now - (M.lastSnap || 0) > 400){
+    PATH = null; M.target = null; M.moving = false;
+    const q = nearestInside(M.x, M.y);
+    M.x = q.x; M.y = q.y; M.lastSnap = now;
+  }
+  // stuckCheck 暂时不启用（会和目标争夺，先保证点击能走）
   // 自己走：空闲且没在做事时，到点就挑个点走过去
   if(AUTO && !M.moving && !M.target && !M.action && !M.sleeping){
     if(!nextWanderAt) scheduleWander(now);
     else if(now > nextWanderAt){
+      // 只挑真的能走到的点：路径存在且足够长，否则这轮不动
       const p = randomWalkPoint();
-      if(p) setTarget(p);
+      if(p){
+        const path = findPath({ x: M.x, y: M.y }, p);
+        if(path && path.length > 3) setTarget(p);
+      }
       scheduleWander(now);
     }
   } else if(M.moving || M.target || M.action || M.sleeping){
-    nextWanderAt = 0;
+    nextWanderAt = 0;      // 有事的期间不计时，忙完重新计时
   }
   // 停下了就保持最后的朝向，不自动转回正面
-  // 只在完全没路可走时脱困（有路径就别动，否则会来回弹）
-  if(!PATH && blocked(M.x, M.y)){
+  // 只在完全没路可走时脱困；每秒最多一次，避免被反复拉扯造成抖动
+  if(!PATH && blocked(M.x, M.y) && now - (M.lastUnstuck || 0) > 1000){
     const p = nearestInside(M.x, M.y);
-    M.x = p.x; M.y = p.y;
+    M.x = p.x; M.y = p.y; M.lastUnstuck = now;
   }
   // 沿路径走
   if(PATH && PATH_I < PATH.length){
     const wp = PATH[PATH_I];
     const ddx = wp.x - M.x, ddy = wp.y - M.y;
-    if(Math.hypot(ddx, ddy) < 8){ PATH_I++; }
+    if(Math.hypot(ddx, ddy) < 12){ PATH_I++; }
     else {
       M.moving = true;
       const st = Math.min(Math.hypot(ddx, ddy), M.speed * dt);
-      M.x += ddx / Math.hypot(ddx, ddy) * st;
-      M.y += ddy / Math.hypot(ddx, ddy) * st;
-      if(Math.abs(ddx) > 1) M.face = ddx > 0 ? 1 : -1;
-      setViewByDir(ddx, ddy, now);
+      const nx = M.x + ddx / Math.hypot(ddx, ddy) * st;
+      const ny = M.y + ddy / Math.hypot(ddx, ddy) * st;
+      if(!gridWalkable(nx, ny)){
+        // 下一步会跨出可走区域 → 放弃这条路径，别硬穿出去
+        PATH = null; M.target = null; M.moving = false;
+        return;
+      }
+      M.x = nx; M.y = ny;
+      if(Math.abs(ddx) > 3) M.face = ddx > 0 ? 1 : -1;
+      setViewByDir(M.target ? M.target.x - M.x : ddx, M.target ? M.target.y - M.y : ddy, now);
       return;
     }
   }
   if(!M.target){ M.moving = false; return; }
   const dx = M.target.x - M.x, dy = M.target.y - M.y;
   const d = Math.hypot(dx, dy);
-  if(d < 4){
+  if(d < 10){
     M.moving = false; M.target = null; PATH = null; M.idleAt = performance.now();
     if(blocked(M.x, M.y)){ const q = nearestInside(M.x, M.y); M.x = q.x; M.y = q.y; }
     return;
@@ -486,12 +598,17 @@ function step(now, dt){
   // 朝向由移动方向决定，这里不再强制正面
 }
 
+let RAF_ON = false;
 function tick(now){
   const dt = Math.min(0.08, (now - last)/1000);
   last = now;
   step(now, dt);
   draw(now);
-  
+  drawDebug(now);
+  if(STATIC_FRAME) return;
+  requestAnimationFrame(tick);
+}
+
 /* 读我排的行程：服务端 /api/route 有新的 points 就依次走过去 */
 let lastRouteId = -1, routeQueue = [], routeTimer = null;
 function runRoutePoint(){
@@ -514,11 +631,12 @@ setInterval(async () => {
   }catch(e){}
 }, 2500);
 
-requestAnimationFrame(tick);
-}
+// （启动统一放在文件末尾，带 RAF_ON 守卫）
 
 /* ---------- 交互 ---------- */
 cv.addEventListener('click', (e) => {
+  // 手动操作优先：取消正在执行的行程
+  routeQueue.length = 0; clearTimeout(routeTimer);
   if(EDIT || (typeof ZONE !== 'undefined' && ZONE)) return;   // 编辑/圈区域时不触发游戏
   if(fridgePanel && fridgePanel.style.display === 'block') fridgePanel.style.display = 'none';
   const r = cv.getBoundingClientRect();
@@ -564,7 +682,7 @@ cv.addEventListener('click', (e) => {
 
   // 点地板
   M.action = null;
-  for(const o of FURN) if(o.wet && o.stage === 2) o.stage = 0;
+  for(const o of FURN) if(o.wet && o.stage === 2) o.stage = 0;   // 从缸里出来就排空
   nextWanderAt = 0;
   setTarget({ x:px, y:py });
 });
@@ -592,7 +710,7 @@ async function showFridge(){
 }
 
 function send(path, data){
-  if(!API) return;   // 静态模式没有后端
+  if(!API) return;   // 静态托管没有后端
   fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) }).catch(()=>{});
 }
 
@@ -777,7 +895,8 @@ if(!ZONE) /* 启动：从服务端取回上一次的位置 */
 buildGrid();
 
 /* ===== 动作图微调：?act=sink 拖动改位置、滚轮改大小 ===== */
-const AUTO = new URLSearchParams(location.search).get('auto') !== '0';   // ?auto=0 关掉自己走
+const AUTO = new URLSearchParams(location.search).get('auto') === '1';   // 默认关，?auto=1 打开
+const DEBUG_OVERLAY = new URLSearchParams(location.search).get('debug') === '1';   // ?auto=0 关掉自己走
 const ACT_TUNE = new URLSearchParams(location.search).get('act');
 if(ACT_TUNE){
   const target = FURN.find(o => o.id === ACT_TUNE);
@@ -829,7 +948,7 @@ if(ACT_TUNE){
   setTimeout(() => { M.action = ACT_TUNE; M.moving = false; M.x = target.x; M.y = target.y + 40; }, 300);
 }
 
-if(!ZONE) requestAnimationFrame(tick);   // 圈区域模式不跑游戏循环
+if(!ZONE && !RAF_ON){ RAF_ON = true; requestAnimationFrame(tick); }   // 只跑一个循环
 </script>
 </body>
 </html>

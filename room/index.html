@@ -94,6 +94,7 @@ function footRect(o){ return { x:o.x - o.w*0.26, y:o.y - 12, w:o.w*0.52, h:22 };
 const M = { x:700, y:480, face:1, moving:false, view:'front', sleeping:false, action:null, target:null, speed:230 };
 const STATIC_FRAME = new URLSearchParams(location.search).get('static') === '1';   // ?static=1 只画一帧
 const NO_WALKFRAMES = new URLSearchParams(location.search).get('walk') !== '1';   // 默认用站立图+轻微起伏，?walk=1 才用走路帧   // ?walk=0 关掉走路帧
+const MIRROR_SWAP = new URLSearchParams(location.search).get('mirror') === '1' ? -1 : 1;   // ?mirror=1 反转左右
 const HER_H_PX = Number(new URLSearchParams(location.search).get('herh')) || 112;   // 统一身高，?herh= 可调
 
 function herRect(){ return { x:M.x-16, y:M.y-26, w:32, h:28 }; }
@@ -268,6 +269,17 @@ function draw(now){
 function drawHer(now){
   const shelfO = FURN.find(o => o.id === 'shelf');
   const nearShelf = shelfO && Math.hypot(M.x - (shelfO.sx || shelfO.x), M.y - (shelfO.sy || shelfO.y)) < 70;
+  // 行走时按"当前要去的路点"直接算朝向（不经过状态机，保证一定会扭头）
+  let dirView = M.view, dirFlip = (M.sideFlip || 1);
+  if(M.moving){
+    const wp = (PATH && PATH[PATH_I]) ? PATH[PATH_I] : M.target;
+    if(wp){
+      const dx = wp.x - M.x, dy = wp.y - M.y;
+      if(Math.abs(dx) > Math.abs(dy) * 1.2){ dirView = 'side'; dirFlip = (dx >= 0 ? -1 : 1) * MIRROR_SWAP; }
+      else dirView = dy < 0 ? 'back' : 'front';
+    }
+  }
+  if(M.moving){ M.view = dirView; M.sideFlip = dirFlip; }   // 停下后保持最后的朝向
   const reading = M.action === 'shelf' && !M.moving && nearShelf;
   let im;
   if(reading){
@@ -278,7 +290,7 @@ function drawHer(now){
     const idx = 1 + (Math.floor(now / 110) % 8);
     im = HER_VIEWS[prefix + idx] || HER_VIEWS[prefix + 1] || HER_VIEWS.front || herImg('front');
   } else {
-    im = HER_VIEWS[M.view] || HER_VIEWS.front || herImg('front');
+    im = HER_VIEWS[dirView] || HER_VIEWS.front || herImg('front');
   }
   if(!im.complete || !im.naturalWidth) return;
   const h = HER_H_PX;
@@ -298,7 +310,7 @@ function drawHer(now){
   // 贴到浴室那道竖墙也算遮挡（范围收窄，避免站在地上就被虚化）
   const wallHit = (hb.x + hb.w > 436 && hb.x < 532 && hb.y + hb.h > 300 && hb.y < 700);
   ctx.globalAlpha = (covered > 0.12 || wallHit) ? 0.55 : 1;
-  const flip = (M.view === 'side') ? (M.sideFlip || 1) : 1;   // 侧面方向是稳定的，不逐帧翻
+  const flip = (dirView === 'side') ? dirFlip : 1;
   ctx.translate(M.x, M.y - bob);
   ctx.scale(flip, 1);
   ctx.drawImage(im, -w/2, -h, w, h);
@@ -373,7 +385,7 @@ function buildGrid(){
     }
   }
   // 只向外扩 1 格（10px）：让贴边的走道能过，但不会漫出地板
-  const R = 1;
+  const R = 2;   // 补缝范围 20px
   GRID = new Uint8Array(GW * GH);
   for(let gy = 0; gy < GH; gy++) for(let gx = 0; gx < GW; gx++){
     if(!raw[gy*GW+gx]) continue;
@@ -536,15 +548,7 @@ function scheduleWander(now){
 }
 
 function setViewByDir(dx, dy, now){
-  let want;
-  if(Math.abs(dx) > Math.abs(dy) * 1.2) want = 'side';
-  else want = dy < 0 ? 'back' : 'front';
-  if(want === M.view){ M.candView = want; return; }
-  if(M.candView !== want){ M.candView = want; M.candSince = now; return; }
-  if(now - (M.candSince || 0) > 900){
-    M.view = want;
-    if(want === 'side') M.sideFlip = (dx >= 0 ? -1 : 1);   // 朝右走镜像，朝左走用原图
-  }
+  return;   // 已停用：朝向在绘制时按当前路点算，这一套会和它互相覆盖
 }
 
 /* 卡住检测：想走但位置没变 → 放弃这个目标 */

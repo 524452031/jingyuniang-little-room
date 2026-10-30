@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>小房间</title>
+<style>
+  html,body{margin:0;height:100%;background:#0a0d14;overflow:hidden;font-family:"Microsoft YaHei",system-ui,sans-serif;}
+  #wrap{position:fixed;inset:0;display:grid;place-items:center;}
+  canvas{display:block;cursor:pointer;}
+  #bubble{position:fixed;max-width:320px;padding:10px 14px;border-radius:12px;background:#f4f7fb;color:#1a2233;
+    font-size:15px;line-height:1.5;pointer-events:none;box-shadow:0 6px 18px rgba(0,0,0,.35);display:none;transform:translate(-50%,-100%);}
+  #bubble::after{content:'';position:absolute;left:50%;bottom:-8px;margin-left:-8px;border:8px solid transparent;border-top-color:#f4f7fb;border-bottom:0;}
+  #fridge{position:fixed;right:20px;top:20px;min-width:220px;padding:14px 16px;border-radius:12px;
+    background:#111a2a;color:#cfe2f7;font-size:14px;line-height:1.8;display:none;box-shadow:0 8px 24px rgba(0,0,0,.45);}
+  #night{position:fixed;inset:0;background:#0a1428;opacity:0;pointer-events:none;transition:opacity .6s;}
+  #hud{position:fixed;left:14px;bottom:10px;font-size:12px;color:#7f93ad;opacity:.7;white-space:pre;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv"></canvas></div>
+<div id="night"></div>
+<div id="bubble"></div>
+<div id="fridge"></div>
+<div id="hud"></div>
+<script>
+window.onerror = function(msg, src, line, col){
+  const d = document.createElement('div');
+  d.style.cssText = 'position:fixed;left:0;right:0;top:0;background:#7a1020;color:#fff;padding:10px 14px;font:13px/1.5 monospace;z-index:999;white-space:pre-wrap';
+  d.textContent = 'ERROR: ' + msg + '\n  at line ' + line + ':' + col;
+  document.body.appendChild(d);
+};
+
+const ROOM_ID = (location.pathname.match(/^\/room\/([a-zA-Z0-9_-]+)/) || [])[1] || 'main';
+/* 两种跑法：
+   1) 挂在服务端上：/room/<房号>  → 素材走 /room/<房号>/obj/
+   2) 静态托管：直接用文件  → 素材走 ./assets/room/
+   静态模式下没有后端，位置/说话等接口会静默失败，画面照常。 */
+const STANDALONE = !/^\/room\/[a-zA-Z0-9_-]+/.test(location.pathname);
+const API = STANDALONE ? '' : '/room/' + ROOM_ID + '/api';
+const ASSET = STANDALONE ? './assets/room/' : '/room/' + ROOM_ID + '/obj/';
+const VIEW_DIR = STANDALONE ? './assets/character/' : '/room/' + ROOM_ID + '/views/';
+const ASSET_V = '71';   // 换素材后 +1，破缓存
+
+const IMG_W = 1199, IMG_H = 702;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const hud = document.getElementById('hud');
+const bubbleEl = document.getElementById('bubble');
+const nightEl = document.getElementById('night');
+
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+cv.width = IMG_W * DPR; cv.height = IMG_H * DPR;
+cv.style.width = IMG_W + 'px'; cv.style.height = IMG_H + 'px';
+function fitCanvas(){
+  const k = Math.min(window.innerWidth / IMG_W, window.innerHeight / IMG_H);
+  cv.style.width = Math.round(IMG_W * k) + 'px';
+  cv.style.height = Math.round(IMG_H * k) + 'px';
+}
+fitCanvas();
+window.addEventListener('resize', fitCanvas);
+function resetT(){ ctx.setTransform(DPR,0,0,DPR,0,0); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; }
+
+/* ---------- 素材 ---------- */
+const IMGS = {};
+function img(name){
+  if(!IMGS[name]){ const i = new Image(); i.src = ASSET + name + '.png?v=' + ASSET_V; IMGS[name] = i; }
+  return IMGS[name];
+}
+const BASE = img('base_room');
+const HER_VIEWS = {};
+function herImg(name){
+  if(!HER_VIEWS[name]){ const i = new Image(); i.src = VIEW_DIR + name + '.png?v=' + ASSET_V; HER_VIEWS[name] = i; }
+  return HER_VIEWS[name];
+}
+
+/* ---------- 家具（像素坐标，锚点 = 脚下中心） ---------- */
+const FURN = [
+  { id:'bed',    tex:'bed_empty',    act:'act_bed',  actScale:1.15, x:631, y:292, w:175, label:'床' },
+  { id:'fridge', tex:'fridge_empty', act:null,       x:500, y:326, w:80,  label:'冰箱' },
+  { id:'pcdesk', tex:'pcdesk_empty', act:'act_pc',   actScale:1.15, x:807, y:346, w:140, label:'电脑桌' },
+  { id:'table',  tex:'table_empty',  act:'act_eat',  actScale:1.35, x:686, y:446, w:130, label:'餐桌' },
+  { id:'shelf',  tex:'shelf',        act:null,       x:998, y:418, w:100, label:'书架' },
+  { id:'tub',    tex:'tub_empty',    act:'act_bath', wet:'tub_water', stage:0, actScale:0.95, x:109, y:540, w:180, label:'浴缸' },
+  { id:'sink',   tex:'sink',         act:'act_wash', actScale:1.35, actOffX:-17, actOffY:-6, x:286, y:469, w:90,  label:'洗漱台' },
+  { id:'toilet', tex:'toilet',       act:null,       x:457, y:578, w:100, label:'马桶' }
+];
+
+/* 碰撞：脚下的一小块 */
+function footRect(o){ return { x:o.x - o.w*0.26, y:o.y - 12, w:o.w*0.52, h:22 }; }
+
+/* ---------- 她 ---------- */
+const M = { x:700, y:480, face:1, moving:false, view:'front', sleeping:false, action:null, target:null, speed:230 };
+const HER_W = Number(new URLSearchParams(location.search).get('her')) || 85;
+
+function herRect(){ return { x:M.x-16, y:M.y-26, w:32, h:28 }; }
+
+/* 物件实际画出来的矩形（含动作图缩放） */
+function drawnBox(o, texName){
+  const im = img(texName || o.tex);
+  const sc = (texName && texName === o.act) ? (o.actScale || 1) : ((o.wet && o.stage === 1) ? 1 : 1);
+  const w = o.w * sc;
+  const h = w * ((im.naturalHeight || 1) / (im.naturalWidth || 1));
+  return { x: o.x - w/2, y: o.y - h, w, h };
+}
+
+/* 浴室那道墙的屏幕范围：她压到这里就半透明 */
+const WALL_BOX = { x: 436, y: 300, w: 96, h: 400 };   // 只框那道竖着的墙
+
+/* 可走区域：人肉圈出来的九块（2026-10-30 晚） */
+const WALK_POLYS = [[[243,458],[412,558],[270,648],[105,564]],[[294,487],[348,456],[414,492],[386,537]],[[355,372],[351,451],[414,486],[408,343]],[[514,332],[589,296],[645,327],[591,371]],[[545,368],[545,523],[602,550],[607,390]],[[630,440],[620,556],[790,661],[912,588]],[[686,467],[859,343],[1137,482],[934,592]],[[709,315],[793,378],[822,354],[732,301]],[[630,291],[712,256],[712,284],[659,316]],[[400,450],[535,470],[535,520],[400,500]]];   // 最后一块是门口
+
+function inPoly(px, py, poly){
+  let inside = false;
+  for(let i = 0, j = poly.length - 1; i < poly.length; j = i++){
+    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+    if(((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+
+function inAnyWalk(px, py){
+  for(const poly of WALK_POLYS) if(inPoly(px, py, poly)) return true;
+  return false;
+}
+
+/* 把点拉回最近的可走位置（螺旋搜索） */
+function nearestInside(x, y){
+  for(let r = 0; r <= 500; r += 6){
+    for(let a = 0; a < 32; a++){
+      const ang = a * Math.PI / 16;
+      const nx = x + Math.cos(ang) * r;
+      const ny = y + Math.sin(ang) * r;
+      if(!blocked(nx, ny)) return { x:nx, y:ny };
+    }
+  }
+  for(const poly of WALK_POLYS){
+    const p0 = poly[0];
+    if(!blocked(p0[0], p0[1])) return { x:p0[0], y:p0[1] };
+  }
+  return { x:700, y:480 };
+}
+
+function blocked(x, y){
+  // 与建网格用同一个判定点：(x, y) 就是脚下那一点
+  if(!inAnyWalk(x, y)) return true;
+  for(const o of FURN){
+    const f = footRect(o);
+    if(x > f.x && x < f.x + f.w && y > f.y && y < f.y + f.h) return true;
+  }
+  return false;
+}
+
+
+/* ---------- 绘制 ---------- */
+let bubble = { text:'', until:0 };
+let BG_GRAD = null;
+
+function draw(now){
+  resetT();
+  ctx.clearRect(0,0,IMG_W,IMG_H);
+  if(!BG_GRAD){
+    BG_GRAD = ctx.createRadialGradient(IMG_W*0.5, IMG_H*0.46, IMG_H*0.15,
+                                       IMG_W*0.5, IMG_H*0.46, IMG_W*0.78);
+    BG_GRAD.addColorStop(0, '#232a36');
+    BG_GRAD.addColorStop(0.55, '#161b25');
+    BG_GRAD.addColorStop(1, '#0a0d13');
+  }
+  ctx.fillStyle = BG_GRAD; ctx.fillRect(0,0,IMG_W,IMG_H);
+
+  if(BASE.complete && BASE.naturalWidth) ctx.drawImage(BASE, 0, 0, IMG_W, IMG_H);
+
+  // 家具：按 y 排序，她插在中间
+  const items = FURN.map(o => ({ kind:'f', o, y:o.y })).concat([{ kind:'her', y:M.y }]);
+  items.sort((a,b) => a.y - b.y);
+
+  const acting = M.action && !M.moving;
+  for(const it of items){
+    if(it.kind === 'her'){
+      const hiddenBy = acting && ['bed','pcdesk','table','tub','sink'].includes(M.action);
+      if(!hiddenBy) drawHer(now);
+      continue;
+    }
+    const o = it.o;
+    let texName = o.tex, scale = 1, offX = 0, offY = 0;
+    if(acting && M.action === o.id && o.act){ texName = o.act; scale = o.actScale || 1; offX = o.actOffX || 0; offY = o.actOffY || 0; }
+    else if(o.wet && o.stage >= 1) texName = o.wet;   // 有水就显示有水（包括她正走过去那段）
+    const im = img(texName);
+    if(!im.complete || !im.naturalWidth) continue;
+    const w = o.w * scale;
+    const h = w * im.naturalHeight / im.naturalWidth;
+    ctx.drawImage(im, o.x - w/2 + offX, o.y - h + offY, w, h);
+  }
+
+  // 睡着
+  nightEl.style.opacity = M.sleeping ? 0.42 : 0;
+  if(M.sleeping && M.action === 'bed' && !M.moving){
+    ctx.fillStyle = '#9fc0ea';
+    ctx.font = 'bold 20px system-ui';
+    ctx.fillText('z z', M.x + 26, M.y - HER_W*1.1);
+  }
+
+  // 气泡
+  if(bubble.text && now < bubble.until){
+    drawBubble(now);
+  } else {
+    bubbleEl.style.display = 'none';
+  }
+
+  const cellOk = GRID ? walkable(Math.round(M.x/CELL), Math.round(M.y/CELL)) : false;
+  hud.textContent = '格 ' + (cellOk ? '可走' : '不可走') + '  路径 ' + (PATH ? PATH.length : 0) + '  格总数 ' + (GRID ? GRID.reduce((a,b)=>a+b,0) : -1) + '\\n' +
+    '位置 ' + Math.round(M.x) + ',' + Math.round(M.y) +
+    '   状态 ' + (M.sleeping ? '睡着' : M.moving ? '在走' : '待着') +
+    '   房间 ' + IMG_W + '×' + IMG_H + '\n点地板走过去 · 点她说话 · 点家具做事';
+}
+
+function drawHer(now){
+  const reading = M.action === 'shelf' && !M.moving;
+  const im = reading ? img('act_read') : (HER_VIEWS[M.view] || HER_VIEWS.front || herImg('front'));
+  if(!im.complete || !im.naturalWidth) return;
+  const h = HER_W * im.naturalHeight / im.width;
+  ctx.save();
+  const bob = M.moving ? Math.sin(now/160)*2 : 0;
+  // 被前面的家具挡住时半透明（看起来像在后面，不是被切断）
+  const hb = { x: M.x - HER_W/2, y: M.y - h, w: HER_W, h: h };
+  let covered = 0;
+  for(const o of FURN){
+    if(o.y <= M.y) continue;                       // 只算画在她前面的
+    const ob = drawnBox(o, (M.action === o.id && o.act) ? o.act : (o.wet && o.stage >= 1 ? o.wet : o.tex));
+    const ix = Math.max(0, Math.min(hb.x+hb.w, ob.x+ob.w) - Math.max(hb.x, ob.x));
+    const iy = Math.max(0, Math.min(hb.y+hb.h, ob.y+ob.h) - Math.max(hb.y, ob.y));
+    covered = Math.max(covered, (ix*iy) / (hb.w*hb.h));
+  }
+  ctx.globalAlpha = covered > 0.25 ? 0.55 : 1;
+  const flip = (M.view === 'side' && M.face > 0) ? -1 : 1;
+  ctx.translate(M.x, M.y - bob);
+  ctx.scale(flip, 1);
+  ctx.drawImage(im, -HER_W/2, -h, HER_W, h);
+  ctx.restore();
+}
+
+function drawBubble(now){
+  const font = '15px "Microsoft YaHei", system-ui, sans-serif';
+  ctx.font = font;
+  const maxW = 300;
+  const words = bubble.text.split('');
+  const lines = []; let cur = '';
+  for(const ch of words){
+    if(ctx.measureText(cur + ch).width > maxW){ lines.push(cur); cur = ch; }
+    else cur += ch;
+  }
+  if(cur) lines.push(cur);
+  const lh = 22, tw = Math.max(...lines.map(l => ctx.measureText(l).width));
+  const w = Math.min(maxW + 28, tw + 26), h = lines.length*lh + 18;
+  let anchorX = M.x, anchorY = M.y - HER_W*1.25;
+  const hiddenBy = M.action && !M.moving && ['bed','pcdesk','table','tub','sink'].includes(M.action);
+  if(hiddenBy){
+    const o = FURN.find(f => f.id === M.action);
+    if(o){
+      const im = img(o.act || o.tex);
+      const sc = o.actScale || 1;
+      const hh = o.w * sc * ((im.naturalHeight || 1) / (im.naturalWidth || 1));
+      anchorX = o.x;
+      anchorY = o.y - hh * 0.92;
+    }
+  }
+  const x = Math.max(8, Math.min(IMG_W - w - 8, anchorX - w/2));
+  const y = anchorY - h;
+
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, (bubble.until - now)/900);
+  ctx.fillStyle = '#f4f7fb';
+  ctx.beginPath();
+  if(ctx.roundRect) ctx.roundRect(x, y, w, h, 12); else ctx.rect(x, y, w, h);
+  ctx.fill();
+  ctx.fillStyle = '#eef2f8';
+  ctx.beginPath();
+  const ax = Math.max(x+16, Math.min(x+w-16, anchorX));
+  ctx.moveTo(ax-8, y+h-2); ctx.lineTo(ax+8, y+h-2); ctx.lineTo(ax, y+h+10);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#1a2233'; ctx.font = font; ctx.textAlign = 'center';
+  lines.forEach((l,i) => ctx.fillText(l, x + w/2, y + 15 + lh*i));
+  ctx.restore();
+}
+
+/* ---------- 移动 ---------- */
+let last = performance.now();
+
+/* ---------- 网格寻路 ---------- */
+const CELL = 10;
+const GW = Math.ceil(IMG_W / CELL), GH = Math.ceil(IMG_H / CELL);
+let GRID = null;
+
+function buildGrid(){
+  const raw = new Uint8Array(GW * GH);
+  for(let gy = 0; gy < GH; gy++){
+    for(let gx = 0; gx < GW; gx++){
+      const x = gx * CELL + CELL / 2, y = gy * CELL + CELL / 2;
+      let ok = inAnyWalk(x, y);
+      if(ok){
+        for(const o of FURN){
+          const f = footRect(o);
+          if(x > f.x && x < f.x + f.w && y > f.y && y < f.y + f.h){ ok = false; break; }
+        }
+      }
+      raw[gy * GW + gx] = ok ? 1 : 0;
+    }
+  }
+  // 闭运算：先膨胀再腐蚀，把九块之间的窄缝补上（半径 2 格 ≈ 20px）
+  const R = 2;
+  const dil = new Uint8Array(GW * GH);
+  for(let gy = 0; gy < GH; gy++) for(let gx = 0; gx < GW; gx++){
+    if(!raw[gy*GW+gx]) continue;
+    for(let dy = -R; dy <= R; dy++) for(let dx = -R; dx <= R; dx++){
+      const nx = gx+dx, ny = gy+dy;
+      if(nx>=0 && ny>=0 && nx<GW && ny<GH) dil[ny*GW+nx] = 1;
+    }
+  }
+  GRID = new Uint8Array(GW * GH);
+  for(let gy = 0; gy < GH; gy++) for(let gx = 0; gx < GW; gx++){
+    if(!dil[gy*GW+gx]) continue;
+    let keep = 1;
+    for(let dy = -R; dy <= R && keep; dy++) for(let dx = -R; dx <= R; dx++){
+      const nx = gx+dx, ny = gy+dy;
+      if(!(nx>=0 && ny>=0 && nx<GW && ny<GH) || !dil[ny*GW+nx]){ keep = 0; break; }
+    }
+    GRID[gy*GW+gx] = keep && raw[gy*GW+gx] ? 1 : (keep ? 1 : 0);
+  }
+}
+
+
+function cellOf(p){ return { gx: Math.max(0, Math.min(GW-1, Math.round(p.x / CELL))), gy: Math.max(0, Math.min(GH-1, Math.round(p.y / CELL))) }; }
+function centerOf(gx, gy){ return { x: gx * CELL + CELL/2, y: gy * CELL + CELL/2 }; }
+function walkable(gx, gy){
+  if(gx < 0 || gy < 0 || gx >= GW || gy >= GH) return false;
+  return GRID[gy * GW + gx] === 1;
+}
+
+function findPath(from, to){
+  const a = cellOf(from), b = cellOf(to);
+  if(!walkable(b.gx, b.gy)){
+    // 目标不可走：找附近最近的可走格
+    let best = null, bd = 1e9;
+    for(let r = 1; r <= 30 && !best; r++){
+      for(let dy = -r; dy <= r; dy++) for(let dx = -r; dx <= r; dx++){
+        const gx = b.gx + dx, gy = b.gy + dy;
+        if(!walkable(gx, gy)) continue;
+        const d = dx*dx + dy*dy;
+        if(d < bd){ bd = d; best = { gx, gy }; }
+      }
+    }
+    if(!best) return null;
+    b.gx = best.gx; b.gy = best.gy;
+  }
+  if(!walkable(a.gx, a.gy)){
+    return [centerOf(b.gx, b.gy)];
+  }
+  const open = [a.gx + a.gy * GW];
+  const came = new Map();
+  const gScore = new Map([[open[0], 0]]);
+  const fScore = new Map([[open[0], Math.hypot(b.gx-a.gx, b.gy-a.gy)]]);
+  const goal = b.gx + b.gy * GW;
+  const seen = new Set();
+
+  while(open.length){
+    open.sort((i, j) => (fScore.get(i) ?? 1e9) - (fScore.get(j) ?? 1e9));
+    const cur = open.shift();
+    if(cur === goal){
+      const out = [];
+      let c = cur;
+      while(c !== undefined){
+        out.push(centerOf(c % GW, Math.floor(c / GW)));
+        c = came.get(c);
+      }
+      return out.reverse();
+    }
+    seen.add(cur);
+    const cx = cur % GW, cy = Math.floor(cur / GW);
+    for(const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]]){
+      const nx = cx + dx, ny = cy + dy;
+      if(!walkable(nx, ny)) continue;
+      const ni = nx + ny * GW;
+      if(seen.has(ni)) continue;
+      const step = (dx && dy) ? 1.414 : 1;
+      const ng = (gScore.get(cur) ?? 1e9) + step;
+      if(ng < (gScore.get(ni) ?? 1e9)){
+        came.set(ni, cur);
+        gScore.set(ni, ng);
+        fScore.set(ni, ng + Math.hypot(b.gx - nx, b.gy - ny));
+        if(!open.includes(ni)) open.push(ni);
+      }
+    }
+  }
+  return null;
+}
+
+let PATH = null, PATH_I = 0;
+function setTarget(p){
+  const path = findPath({ x:M.x, y:M.y }, p);
+  if(!path || !path.length){ PATH = null; M.target = p; return; }   // 兜底：直走
+  PATH = path; PATH_I = 0; M.target = path[path.length - 1]; M.path = path;
+}
+
+
+/* 朝向：方向要稳定 180ms 才换，避免路径拐点造成连转头 */
+function setViewByDir(dx, dy, now){
+  let want;
+  if(Math.abs(dx) > Math.abs(dy) * 1.2) want = 'side';
+  else want = dy < 0 ? 'back' : 'front';
+  if(want === M.view){ M.candView = want; return; }
+  if(M.candView !== want){ M.candView = want; M.candSince = now; return; }
+  if(now - (M.candSince || 0) > 180){ M.view = want; }
+}
+
+function step(now, dt){
+  // 停下了就保持最后的朝向，不自动转回正面
+  // 只在完全没路可走时脱困（有路径就别动，否则会来回弹）
+  if(!PATH && blocked(M.x, M.y)){
+    const p = nearestInside(M.x, M.y);
+    M.x = p.x; M.y = p.y;
+  }
+  // 沿路径走
+  if(PATH && PATH_I < PATH.length){
+    const wp = PATH[PATH_I];
+    const ddx = wp.x - M.x, ddy = wp.y - M.y;
+    if(Math.hypot(ddx, ddy) < 8){ PATH_I++; }
+    else {
+      M.moving = true;
+      const st = Math.min(Math.hypot(ddx, ddy), M.speed * dt);
+      M.x += ddx / Math.hypot(ddx, ddy) * st;
+      M.y += ddy / Math.hypot(ddx, ddy) * st;
+      if(Math.abs(ddx) > 1) M.face = ddx > 0 ? 1 : -1;
+      setViewByDir(ddx, ddy, now);
+      return;
+    }
+  }
+  if(!M.target){ M.moving = false; return; }
+  const dx = M.target.x - M.x, dy = M.target.y - M.y;
+  const d = Math.hypot(dx, dy);
+  if(d < 4){
+    M.moving = false; M.target = null; PATH = null; M.idleAt = performance.now();
+    if(blocked(M.x, M.y)){ const q = nearestInside(M.x, M.y); M.x = q.x; M.y = q.y; }
+    return;
+  }
+  M.moving = true;
+  const s = Math.min(d, M.speed * dt);
+  const nx = M.x + dx/d*s, ny = M.y + dy/d*s;
+  if(!blocked(nx, M.y)) M.x = nx;
+  if(!blocked(M.x, ny)) M.y = ny;
+  if(Math.abs(dx) > 2) M.face = dx > 0 ? 1 : -1;
+  // 朝向由移动方向决定，这里不再强制正面
+}
+
+function tick(now){
+  const dt = Math.min(0.08, (now - last)/1000);
+  last = now;
+  step(now, dt);
+  draw(now);
+  requestAnimationFrame(tick);
+}
+
+/* ---------- 交互 ---------- */
+cv.addEventListener('click', (e) => {
+  if(EDIT || (typeof ZONE !== 'undefined' && ZONE)) return;   // 编辑/圈区域时不触发游戏
+  if(fridgePanel && fridgePanel.style.display === 'block') fridgePanel.style.display = 'none';
+  const r = cv.getBoundingClientRect();
+  const px = (e.clientX - r.left) * (IMG_W / r.width);
+  const py = (e.clientY - r.top) * (IMG_H / r.height);
+
+  // 点她
+  const hr = herRect();
+  if(px > hr.x && px < hr.x+hr.w && py > hr.y-70 && py < hr.y+hr.h){
+    M.sleeping = false;
+    send(API + '/events', { type:'touch', x:Math.round(M.x), y:Math.round(M.y) });
+    return;
+  }
+  // 点冰箱 → 看余额
+  const fr = FURN.find(o => o.id === 'fridge');
+  if(fr){
+    const b = drawnBox(fr);
+    if(px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h){
+      showFridge();
+      M.action = null;
+      setTarget({ x: fr.x, y: b.y + b.h + 30 });
+      send(API + '/events', { type:'furniture', id:'fridge', name:'冰箱', intent:'看余额', x:Math.round(M.x), y:Math.round(M.y) });
+      return;
+    }
+  }
+
+  // 点家具
+  for(const o of FURN){
+    const tex = (M.action === o.id && o.act) ? o.act : (o.wet && o.stage >= 1 ? o.wet : o.tex);
+    const b = drawnBox(o, tex);
+    if(px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h){
+      if(o.wet){
+        if(o.stage === 0){ o.stage = 1; M.action = null; return; }      // 空 → 放水
+        if(o.stage === 1){ o.stage = 2; M.action = o.id; setTarget({ x:o.x, y: b.y + b.h + 30 }); return; }  // 有水 → 她进去
+        o.stage = 0; M.action = null; return;                          // 洗完 → 排空
+      }
+      M.action = o.id;
+      setTarget({ x:o.x, y: b.y + b.h + 30 });     // 站到它正前方
+      send(API + '/events', { type:'furniture', id:o.id, name:o.label || o.id, intent:'', x:Math.round(M.x), y:Math.round(M.y) });
+      return;
+    }
+  }
+
+  // 点地板
+  M.action = null;
+  for(const o of FURN) if(o.wet && o.stage === 2) o.stage = 0;   // 从缸里出来就排空
+  setTarget({ x:px, y:py });
+});
+
+const fridgePanel = document.getElementById('fridge');
+async function showFridge(){
+  fridgePanel.style.display = 'block';
+  fridgePanel.textContent = '冰箱 · 读数中…';
+  try{
+    const j = await (await fetch(API + '/fridge', { cache:'no-store' })).json();
+    const lines = ['冰箱'];
+    const bal = j.balance || {};
+    if(bal.total != null){
+      const t = bal.at ? new Date(bal.at).toLocaleTimeString('zh-CN', { hour:'2-digit', minute:'2-digit' }) : '';
+      lines.push('余额  ¥' + Number(bal.total).toFixed(2) + (t ? '   (' + t + ' 查的)' : ''));
+    } else {
+      lines.push('余额  读不到');
+    }
+    if(j.wakesToday != null) lines.push('今天叫醒  ' + j.wakesToday + ' 次');
+    if(j.sleeping) lines.push('(她正在睡)');
+    fridgePanel.textContent = lines.join('\n');
+  }catch(e){
+    fridgePanel.textContent = '冰箱 · 读不到';
+  }
+}
+
+function send(path, data){
+  if(!API) return;   // 静态模式没有后端
+  fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) }).catch(()=>{});
+}
+
+/* ---------- 与服务端同步 ---------- */
+setInterval(() => send(API + '/state', { x:Math.round(M.x), y:Math.round(M.y), face:M.face, moving:M.moving, bumps:0 }), 300);
+setInterval(async () => {
+  try{
+    const j = await (await fetch(API + '/pulse', { cache:'no-store' })).json();
+    if(j && j.say && j.say.text && j.say.text !== bubble.text){
+      bubble = { text:j.say.text, until: performance.now() + 20000 };
+      bubbleEl.style.display = 'none';
+    }
+  }catch(e){}
+  try{
+    const st = await (await fetch(API + '/state', { cache:'no-store' })).json();
+    const was = M.sleeping;
+    M.sleeping = !!st.sleeping;
+    if(M.sleeping && !was){
+      const bed = FURN.find(o => o.id === 'bed');
+      if(bed){ M.action = 'bed'; M.target = { x: bed.x, y: bed.y + 40 }; }
+    }
+    if(!M.sleeping && M.action === 'bed') M.action = null;
+  }catch(e){}
+}, 1200);
+
+
+/* ===== 编辑模式：?edit=1 拖动摆家具，滚轮缩放 ===== */
+const EDIT = new URLSearchParams(location.search).get('edit') === '1';
+let dragObj = null, dragOff = { x:0, y:0 };
+
+function toImg(e){
+  const r = cv.getBoundingClientRect();
+  return { x:(e.clientX - r.left) * (IMG_W / r.width), y:(e.clientY - r.top) * (IMG_H / r.height) };
+}
+function hitFurn(p){
+  for(let i = FURN.length - 1; i >= 0; i--){
+    const o = FURN[i];
+    const im = img(o.tex);
+    const h = o.w * (im.naturalHeight || 1) / (im.naturalWidth || 1);
+    if(p.x > o.x - o.w/2 && p.x < o.x + o.w/2 && p.y > o.y - h && p.y < o.y) return o;
+  }
+  return null;
+}
+
+if(EDIT){
+  const panel = document.createElement('div');
+  panel.style.cssText = 'position:fixed;right:12px;top:12px;background:#111a2a;color:#cfe2f7;padding:12px 14px;border-radius:10px;font:13px/1.6 monospace;white-space:pre;max-height:80vh;overflow:auto;z-index:99';
+  document.body.appendChild(panel);
+  const refresh = () => {
+    panel.textContent = '拖动摆家具 · 滚轮缩放 · 松手复制坐标\n\n' +
+      FURN.map(o => o.id.padEnd(7) + ' x:' + Math.round(o.x) + '  y:' + Math.round(o.y) + '  w:' + Math.round(o.w)).join('\n');
+  };
+  window.__refreshPanel = refresh;
+  refresh();
+
+  cv.addEventListener('mousedown', (e) => {
+    const p = toImg(e);
+    const o = hitFurn(p);
+    if(o){ dragObj = o; dragOff = { x:p.x - o.x, y:p.y - o.y }; e.preventDefault(); }
+  });
+  window.addEventListener('mousemove', (e) => {
+    if(!dragObj) return;
+    const p = toImg(e);
+    dragObj.x = p.x - dragOff.x;
+    dragObj.y = p.y - dragOff.y;
+    refresh();
+  });
+  window.addEventListener('mouseup', () => {
+    if(dragObj){
+      const txt = JSON.stringify(FURN.map(o => ({ id:o.id, x:Math.round(o.x), y:Math.round(o.y), w:Math.round(o.w) })));
+      navigator.clipboard && navigator.clipboard.writeText(txt).catch(()=>{});
+      dragObj = null;
+    }
+  });
+  cv.addEventListener('wheel', (e) => {
+    const p = toImg(e);
+    const o = hitFurn(p);
+    if(!o) return;
+    e.preventDefault();
+    o.w = Math.max(30, Math.min(400, o.w * (e.deltaY < 0 ? 1.06 : 0.94)));
+    refresh();
+  }, { passive:false });
+}
+
+
+/* ===== 圈可走区域：?zone=1，点着画，回车或按钮收一块 ===== */
+const ZONE = new URLSearchParams(location.search).get('zone') === '1';
+if(ZONE){
+  const polys = [[]];
+  const panel = document.createElement('div');
+  panel.style.cssText = 'position:fixed;left:12px;top:12px;background:#111a2a;color:#cfe2f7;padding:12px 14px;border-radius:10px;font:13px/1.7 monospace;z-index:99;white-space:pre';
+  panel.textContent = '点着圈可走区域\n回车=收下这一块并开始下一块\nC=清空';
+  document.body.appendChild(panel);
+
+  const drawOverlay = () => {
+    resetT();
+    ctx.clearRect(0,0,IMG_W,IMG_H);
+    if(BASE.complete) ctx.drawImage(BASE,0,0,IMG_W,IMG_H);
+    // 家具也画上，方便对着圈
+    for(const o of FURN){
+      const im = img(o.tex);
+      if(!im.complete || !im.naturalWidth) continue;
+      const h = o.w * im.naturalHeight / im.naturalWidth;
+      ctx.drawImage(im, o.x - o.w/2, o.y - h, o.w, h);
+    }
+    ctx.lineWidth = 2;
+    polys.forEach((poly, i) => {
+      if(!poly.length) return;
+      ctx.strokeStyle = i % 2 ? '#39d0ff' : '#39ff9b';
+      ctx.fillStyle = (i % 2 ? 'rgba(57,208,255,.18)' : 'rgba(57,255,155,.18)');
+      ctx.beginPath();
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for(let k=1;k<poly.length;k++) ctx.lineTo(poly[k].x, poly[k].y);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      poly.forEach(pt => { ctx.beginPath(); ctx.arc(pt.x, pt.y, 4, 0, 7); ctx.fillStyle='#fff'; ctx.fill(); });
+    });
+  };
+
+  cv.addEventListener('click', (e) => {
+    const r = cv.getBoundingClientRect();
+    const x = (e.clientX - r.left) * (IMG_W / r.width);
+    const y = (e.clientY - r.top) * (IMG_H / r.height);
+    polys[polys.length-1].push({ x: Math.round(x), y: Math.round(y) });
+    drawOverlay();
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if(e.key === 'Enter'){
+      if(polys[polys.length-1].length >= 3) polys.push([]);
+      drawOverlay();
+    }
+    // C：取消最近画成的那个圈（整块）
+    if(e.key === 'c' || e.key === 'C'){
+      if(polys.length > 1) polys.pop();
+      else if(polys.length === 1) polys[0].length = 0;
+      if(!polys.length) polys.push([]);
+      drawOverlay();
+      e.preventDefault();
+    }
+    // Z / 退格：只退一个点
+    if(e.key === 'z' || e.key === 'Z' || e.key === 'Backspace'){
+      const cur = polys[polys.length-1];
+      if(cur.length) cur.pop();
+      else if(polys.length > 1) polys.pop();
+      drawOverlay();
+      e.preventDefault();
+    }
+    // 全清：Esc 或 X
+    if(e.key === 'Escape' || e.key === 'x' || e.key === 'X'){ polys.length = 0; polys.push([]); drawOverlay(); }
+  });
+
+  const btn = document.createElement('button');
+  btn.textContent = '复制坐标';
+  btn.style.cssText = 'position:fixed;right:12px;top:12px;padding:10px 16px;border:0;border-radius:8px;background:#4b7bec;color:#fff;font-size:14px;cursor:pointer;z-index:99';
+  btn.onclick = () => {
+    const data = polys.filter(p => p.length >= 3).map(p => p.map(q => [q.x, q.y]));
+    const txt = JSON.stringify(data);
+    navigator.clipboard && navigator.clipboard.writeText(txt);
+    panel.textContent = '已复制：\n' + txt;
+  };
+  document.body.appendChild(btn);
+
+  BASE.addEventListener('load', drawOverlay);
+  setTimeout(drawOverlay, 100);
+}
+
+if(!ZONE) /* 启动：从服务端取回上一次的位置 */
+(async () => {
+  try{
+    const st = await (await fetch(API + '/state', { cache:'no-store' })).json();
+    if(st && Number.isFinite(st.x) && Number.isFinite(st.y)){
+      const p = nearestInside(st.x, st.y);
+      M.x = p.x; M.y = p.y;
+    }
+    if(st && st.sleeping){
+      const bed = FURN.find(o => o.id === 'bed');
+      if(bed){ M.action = 'bed'; M.target = { x:bed.x, y:bed.y + 40 }; }
+    }
+  }catch(e){}
+})();
+
+buildGrid();
+
+/* ===== 动作图微调：?act=sink 拖动改位置、滚轮改大小 ===== */
+const ACT_TUNE = new URLSearchParams(location.search).get('act');
+if(ACT_TUNE){
+  const target = FURN.find(o => o.id === ACT_TUNE);
+  const panel = document.createElement('div');
+  panel.style.cssText = 'position:fixed;right:12px;top:12px;background:#111a2a;color:#cfe2f7;padding:12px 14px;border-radius:10px;font:13px/1.7 monospace;z-index:99;white-space:pre';
+  document.body.appendChild(panel);
+  const refresh = () => {
+    panel.textContent = '动作图微调：' + ACT_TUNE + '\n拖动=改偏移   滚轮=缩放\n' +
+      '偏移 x:' + Math.round(target.actOffX || 0) + '  y:' + Math.round(target.actOffY || 0) +
+      '\n缩放 ' + (target.actScale || 1).toFixed(2) + '\n（松手自动复制）';
+  };
+  refresh();
+  let dragging = false, off = { x:0, y:0 };
+  const toImgPt = (e) => {
+    const r = cv.getBoundingClientRect();
+    return { x:(e.clientX - r.left) * (IMG_W / r.width), y:(e.clientY - r.top) * (IMG_H / r.height) };
+  };
+  cv.addEventListener('mousedown', (e) => {
+    const p = toImgPt(e);
+    const im = img(target.act);
+    const sc = target.actScale || 1;
+    const w = target.w * sc, h = w * (im.naturalHeight || 1) / (im.naturalWidth || 1);
+    const x0 = target.x - w/2 + (target.actOffX || 0), y0 = target.y - h + (target.actOffY || 0);
+    if(p.x > x0 && p.x < x0 + w && p.y > y0 && p.y < y0 + h){
+      dragging = true;
+      off = { x: p.x - (target.actOffX || 0), y: p.y - (target.actOffY || 0) };
+    }
+  });
+  window.addEventListener('mousemove', (e) => {
+    if(!dragging) return;
+    const p = toImgPt(e);
+    target.actOffX = Math.round(p.x - off.x);
+    target.actOffY = Math.round(p.y - off.y);
+    refresh();
+  });
+  window.addEventListener('mouseup', () => {
+    if(dragging){
+      dragging = false;
+      const txt = JSON.stringify({ id:target.id, actOffX: target.actOffX||0, actOffY: target.actOffY||0, actScale: +(target.actScale||1).toFixed(2) });
+      navigator.clipboard && navigator.clipboard.writeText(txt);
+    }
+  });
+  cv.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    target.actScale = Math.max(0.3, Math.min(3, (target.actScale || 1) * (e.deltaY < 0 ? 1.04 : 0.96)));
+    refresh();
+  }, { passive:false });
+  // 强制显示该动作图，方便调
+  setTimeout(() => { M.action = ACT_TUNE; M.moving = false; M.x = target.x; M.y = target.y + 40; }, 300);
+}
+
+if(!ZONE) requestAnimationFrame(tick);   // 圈区域模式不跑游戏循环
+</script>
+</body>
+</html>

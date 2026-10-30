@@ -734,6 +734,11 @@ function step(now, dt){
   const arriveR = M.action ? 60 : 10;   // 有动作时放宽：差一点也算到，否则永远不触发姿势
   if(d < arriveR){
     M.moving = false; M.target = null; PATH = null; M.idleAt = performance.now(); WHY = 'arrive';
+    // 有动作时直接对齐到家具的落脚点（她被动作图盖着，看不出位移）
+    if(M.action){
+      const ao = FURN.find(o => o.id === M.action);
+      if(ao && ao.sx != null){ M.x = ao.sx; M.y = ao.sy; }
+    }
     if(blocked(M.x, M.y)){ const q = nearestInside(M.x, M.y); M.x = q.x; M.y = q.y; }
     return;
   }
@@ -1150,6 +1155,25 @@ if(!ZONE) /* 启动：从服务端取回上一次的位置 */
 setTimeout(() => { HER_READY = true; }, 700);   // 兜底：网络再慢也别等太久
 
 buildGrid();
+
+/* 落脚点自检：不在可走区域内的，就近挪进去（半径 45 像素内找不到就保持原样） */
+(function fixStands(){
+  for(const o of FURN){
+    const sx = (o.sx != null ? o.sx : o.x), sy = (o.sy != null ? o.sy : o.y + 50);
+    if(canGo(sx, sy)) { o.sx = sx; o.sy = sy; continue; }
+    let best = null, bd = 45;
+    for(let r = 6; r <= 45; r += 6){
+      for(let a = 0; a < 12; a++){
+        const ang = a * Math.PI / 6;
+        const x = sx + Math.cos(ang) * r, y = sy + Math.sin(ang) * r;
+        if(canGo(x, y)){ const d = r; if(d < bd){ bd = d; best = { x, y }; } }
+      }
+      if(best) break;
+    }
+    if(best){ o.sx = Math.round(best.x); o.sy = Math.round(best.y); }
+    else { o.sx = sx; o.sy = sy; }
+  }
+})();
 
 /* ===== 动作图微调：?act=sink 拖动改位置、滚轮改大小 ===== */
 const AUTO = new URLSearchParams(location.search).get('auto') === '1';   // 默认关，?auto=1 打开

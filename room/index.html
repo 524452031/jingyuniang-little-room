@@ -100,7 +100,7 @@ function herImg(name){
 const FURN = [
   { id:'bed',    tex:'bed_empty',    act:'act_bed',  actScale:1.15, actOffX:0, actOffY:21, sx:640, sy:330, x:631, y:292, w:175, label:'床' },
   { id:'fridge', tex:'fridge_empty', act:null,       x:500, y:326, w:80,  label:'冰箱' },
-  { id:'pcdesk', tex:'pcdesk_empty', act:'act_pc',   actScale:1.15, sx:790, sy:430, x:807, y:346, w:140, label:'电脑桌' },
+  { id:'pcdesk', tex:'pcdesk_empty', act:'act_pc',   actScale:1.15, actOffX:-11, actOffY:11, sx:790, sy:430, x:807, y:346, w:140, label:'电脑桌' },
   { id:'table',  tex:'table_empty',  act:'act_eat',  actScale:1.35, sx:686, sy:530, x:686, y:446, w:130, label:'餐桌' },
   { id:'shelf',  tex:'shelf',        act:null,       sx:975, sy:480, x:998, y:418, w:100, label:'书架' },
   { id:'tub',    tex:'tub_empty',    act:'act_bath', wet:'tub_water', stage:0, actScale:0.95, sx:190, sy:610, x:109, y:540, w:180, label:'浴缸' },
@@ -229,7 +229,8 @@ preloadFurniture();
 
 
 /* ---------- 性能：离屏缓存 ---------- */
-let WHY = '';   // 最近一次改动是谁做的
+let WHY = '';
+const __perf = { acc:0, n:0, avg:0 };   // 最近一次改动是谁做的
 let BGC = null;                  // 背景 + 屋子，只画一次
 const SPR = new Map();           // 贴图按目标尺寸缓存
 let lastSig = '';                // 上一次画面的状态指纹
@@ -325,7 +326,11 @@ function draw(now){
   } else if(M.action !== 'bed'){
     M.bedSince = 0;
   }
-  nightEl.style.opacity = M.sleeping ? 0.42 : 0;
+  if(nightEl.__on !== !!M.sleeping){
+    nightEl.__on = !!M.sleeping;
+    nightEl.style.display = M.sleeping ? 'block' : 'none';
+    nightEl.style.opacity = M.sleeping ? 0.42 : 0;
+  }
   if(M.sleeping && M.action === 'bed' && !M.moving){
     // zz 要冒在"床上那张图"的头部，而不是她站立的位置
     const bo = FURN.find(o => o.id === 'bed');
@@ -348,10 +353,13 @@ function draw(now){
     bubbleEl.style.display = 'none';
   }
 
+  if(!window.__gridCount && GRID) window.__gridCount = GRID.reduce((a,b)=>a+b,0);
+  if(now - (window.__hudAt || 0) < 250) { if(!DEBUG_OVERLAY) return; }   // HUD 每秒最多更新 4 次
+  window.__hudAt = now;
   const cellOk = GRID ? walkable(Math.floor(M.x/CELL), Math.floor(M.y/CELL)) : false;
-  hud.textContent = '格 ' + (cellOk ? '可走' : '不可走') + '  路径 ' + (PATH ? PATH.length : 0) + '  格总数 ' + (GRID ? GRID.reduce((a,b)=>a+b,0) : -1) + '\n' +
+  hud.textContent = '格 ' + (cellOk ? '可走' : '不可走') + '  路径 ' + (PATH ? PATH.length : 0) + '  格总数 ' + (window.__gridCount || -1) + '\n' +
     '位置 ' + Math.round(M.x) + ',' + Math.round(M.y) +
-    '   状态 ' + (M.sleeping ? '睡着' : M.moving ? '在走' : '待着') + '  by=' + WHY +
+    '   绘制 ' + (__perf.avg || 0).toFixed(1) + ' ms/帧   状态 ' + (M.sleeping ? '睡着' : M.moving ? '在走' : '待着') + '  by=' + WHY +
     '   房间 ' + IMG_W + '×' + IMG_H + '\n点地板走过去 · 点她说话 · 点家具做事';
 }
 
@@ -758,10 +766,16 @@ function tick(now){
   last = now;
   step(now, dt);
   tickRoute(now);
+  const __t0 = performance.now();
   draw(now);
+  { const __ms = performance.now() - __t0; __perf.acc += __ms; __perf.n++; if(__perf.n >= 20){ __perf.avg = __perf.acc/__perf.n; __perf.acc = 0; __perf.n = 0; } }
   drawDebug(now);
   if(STATIC_FRAME) return;
   
+
+requestAnimationFrame(tick);
+}
+
 /* 她“看视频”：服务端 /api/video 有新的就弹一张小卡片 */
 let lastVideoId = -1, videoCard = null;
 function showVideoCard(v){
@@ -787,9 +801,6 @@ setInterval(async () => {
     }
   }catch(e){}
 }, 4000);
-
-requestAnimationFrame(tick);
-}
 
 /* 读我排的行程：服务端 /api/route 有新的 points 就依次走过去 */
 let lastRouteId = -1, routeQueue = [], routeTimer = null;

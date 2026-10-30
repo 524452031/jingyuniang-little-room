@@ -97,6 +97,13 @@ const HER_H_PX = Number(new URLSearchParams(location.search).get('herh')) || 112
 function herRect(){ return { x:M.x-16, y:M.y-26, w:32, h:28 }; }
 
 /* 物件实际画出来的矩形（含动作图缩放） */
+
+/* 点击判定：比整张图小一圈（去掉上半部分和两侧留白） */
+function hitBox(o, texName){
+  const b = drawnBox(o, texName);
+  return { x: b.x + b.w * 0.16, y: b.y + b.h * 0.30, w: b.w * 0.68, h: b.h * 0.70 };
+}
+
 function drawnBox(o, texName){
   const im = img(texName || o.tex);
   const sc = (texName && texName === o.act) ? (o.actScale || 1) : ((o.wet && o.stage === 1) ? 1 : 1);
@@ -468,6 +475,10 @@ let PATH = null, PATH_I = 0;
 let TARGET_COUNT = 0;
 function setTarget(p){
   TARGET_COUNT++;
+  if(!gridWalkable(p.x, p.y)){
+    const q = nearestInside(p.x, p.y);
+    p = { x: q.x, y: q.y };
+  }
   // 能直线看到目标就直着走（避免 A* 在窄门口绕来绕去）
   const here = { x: M.x, y: M.y };
   if(lineFree(here, p)){
@@ -475,7 +486,13 @@ function setTarget(p){
     return;
   }
   const path = findPath(here, p);
-  if(!path || !path.length){ PATH = null; M.target = p; return; }   // 兜底：直走
+  if(!path || !path.length){
+    const q = nearestInside(p.x, p.y);
+    const p2 = findPath({ x: M.x, y: M.y }, q);
+    PATH = p2 && p2.length ? p2 : [q];
+    PATH_I = 0; M.target = PATH[PATH.length - 1];
+    return;
+  }
   PATH = path; PATH_I = 0; M.target = path[path.length - 1]; M.path = path;
 }
 
@@ -570,12 +587,19 @@ function step(now, dt){
       const st = Math.min(Math.hypot(ddx, ddy), M.speed * dt);
       const nx = M.x + ddx / Math.hypot(ddx, ddy) * st;
       const ny = M.y + ddy / Math.hypot(ddx, ddy) * st;
-      if(!gridWalkable(nx, ny)){
-        // 下一步会跨出可走区域 → 放弃这条路径，别硬穿出去
-        PATH = null; M.target = null; M.moving = false;
+      if(gridWalkable(nx, ny)){
+        M.x = nx; M.y = ny;
+      } else if(gridWalkable(nx, M.y)){
+        M.x = nx;                       // 先只走横向（贴着边蹭过去）
+      } else if(gridWalkable(M.x, ny)){
+        M.y = ny;                       // 再只走纵向
+      } else {
+        // 真的过不去：重算一次路径，还不行才放弃
+        const rep = findPath({ x: M.x, y: M.y }, M.target || wp);
+        if(rep && rep.length > 1){ PATH = rep; PATH_I = 0; }
+        else { PATH = null; M.target = null; M.moving = false; }
         return;
       }
-      M.x = nx; M.y = ny;
       if(Math.abs(ddx) > 3) M.face = ddx > 0 ? 1 : -1;
       setViewByDir(M.target ? M.target.x - M.x : ddx, M.target ? M.target.y - M.y : ddy, now);
       return;
@@ -634,6 +658,25 @@ setInterval(async () => {
 // （启动统一放在文件末尾，带 RAF_ON 守卫）
 
 /* ---------- 交互 ---------- */
+
+/* 鼠标悬停：可点的地方变手型，方便判断能不能点 */
+function hoverTarget(px, py){
+  const hr2 = herRect();
+  if(px > hr2.x && px < hr2.x + hr2.w && py > hr2.y - 70 && py < hr2.y + hr2.h) return 'her';
+  for(const o of FURN){
+    const tex = (M.action === o.id && o.act) ? o.act : (o.wet && o.stage >= 1 ? o.wet : o.tex);
+    const b = hitBox(o, tex);
+    if(px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h) return o.id;
+  }
+  return null;
+}
+cv.addEventListener('mousemove', (e) => {
+  const r = cv.getBoundingClientRect();
+  const px = (e.clientX - r.left) * (IMG_W / r.width);
+  const py = (e.clientY - r.top) * (IMG_H / r.height);
+  cv.style.cursor = hoverTarget(px, py) ? 'pointer' : 'default';
+});
+
 cv.addEventListener('click', (e) => {
   // 手动操作优先：取消正在执行的行程
   routeQueue.length = 0; clearTimeout(routeTimer);
@@ -653,7 +696,7 @@ cv.addEventListener('click', (e) => {
   // 点冰箱 → 看余额
   const fr = FURN.find(o => o.id === 'fridge');
   if(fr){
-    const b = drawnBox(fr);
+    const b = hitBox(fr);
     if(px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h){
       showFridge();
       M.action = null;
@@ -666,7 +709,7 @@ cv.addEventListener('click', (e) => {
   // 点家具
   for(const o of FURN){
     const tex = (M.action === o.id && o.act) ? o.act : (o.wet && o.stage >= 1 ? o.wet : o.tex);
-    const b = drawnBox(o, tex);
+    const b = hitBox(o, tex);
     if(px > b.x && px < b.x + b.w && py > b.y && py < b.y + b.h){
       if(o.wet){
         if(o.stage === 0){ o.stage = 1; M.action = null; return; }      // 空 → 放水

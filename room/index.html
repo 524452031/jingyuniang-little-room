@@ -374,13 +374,7 @@ function buildGrid(){
   for(let gy = 0; gy < GH; gy++){
     for(let gx = 0; gx < GW; gx++){
       const x = gx * CELL + CELL / 2, y = gy * CELL + CELL / 2;
-      let ok = inAnyWalk(x, y);
-      if(ok){
-        for(const o of FURN){
-          const f = footRect(o);
-          if(x > f.x && x < f.x + f.w && y > f.y && y < f.y + f.h){ ok = false; break; }
-        }
-      }
+      let ok = inAnyWalk(x, y);   // 家具不再阻挡：只看地板边界（窄处不再卡死）
       raw[gy * GW + gx] = ok ? 1 : 0;
     }
   }
@@ -567,6 +561,8 @@ function stuckCheck(now){
 }
 
 function step(now, dt){
+  // 动作已生效且没有新目标 → 钉住不动（避免坐下又站起地闪）
+  if(M.action && !M.target && !M.moving){ PATH = null; return; }
   // 原地打转检测：1.5 秒内位移不到 3 像素就放弃当前目标（宁可停下也别晃）
   if(M.moving){
     const moved = Math.hypot(M.x - (M.px ?? M.x), M.y - (M.py ?? M.y));
@@ -665,6 +661,7 @@ function tick(now){
   const dt = Math.min(0.08, Math.max(0.008, (now - last)/1000));
   last = now;
   step(now, dt);
+  tickRoute(now);
   draw(now);
   drawDebug(now);
   if(STATIC_FRAME) return;
@@ -700,12 +697,15 @@ requestAnimationFrame(tick);
 
 /* 读我排的行程：服务端 /api/route 有新的 points 就依次走过去 */
 let lastRouteId = -1, routeQueue = [], routeTimer = null;
-function runRoutePoint(){
+let routeWaitUntil = 0;
+function tickRoute(now){
   if(!routeQueue.length) return;
+  if(M.target || M.moving) return;                     // 还在走，等它走完
+  if(!routeWaitUntil){ routeWaitUntil = now + 600; return; }
+  if(now < routeWaitUntil) return;
   const p = routeQueue.shift();
   setTarget({ x: p.x, y: p.y });
-  clearTimeout(routeTimer);
-  routeTimer = setTimeout(runRoutePoint, (Number(p.pause) || 0) + 2500);
+  routeWaitUntil = now + (Number(p.pause) || 0) + 1200;  // 这一点的停留时间
 }
 setInterval(async () => {
   if(!API) return;                       // 静态托管没有后端
@@ -714,8 +714,11 @@ setInterval(async () => {
     if(r && r.id && r.id !== lastRouteId && Array.isArray(r.points) && r.points.length){
       lastRouteId = r.id;
       routeQueue = r.points.slice();
+      // 行程是一次性指令：接过来就清掉服务端，避免每次刷新重演
+      fetch(API + '/route', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ note:'已执行', speed: r.speed || 230, points: [] }) }).catch(()=>{});
       if(Number(r.speed) > 0) M.speed = Number(r.speed);
-      runRoutePoint();
+      routeWaitUntil = 0;
     }
   }catch(e){}
 }, 2500);

@@ -93,6 +93,59 @@ tools/key_green.py     绿幕抠图（边缘泛洪版，见 tools/README.md）
 
 ---
 
+## 别人怎么用
+
+分两种，差别很大。
+
+### 一、只想看看 / 玩一下（几分钟）
+
+```bash
+git clone https://gitee.com/a5245031-1/jingyuniang-little-room
+cd jingyuniang-little-room
+python -m http.server 8000
+# 浏览器打开 http://localhost:8000/room/
+```
+
+**能用的**：走路、点家具做动作、换朝向、浴缸三段、看书、拖动摆家具、圈可走区域。
+**不能用的**：她**不会说话** —— 说话要靠后端（也就是"让某个会话替她说"那层），本仓库不含。
+
+### 二、想要"会说话的完整版"（需要 DSH 环境）
+
+完整的房间是「DSH 插件 + 前端页面」两部分：
+
+```text
+插件层（未开源）  负责叫醒某条会话、把页面点击变成一句请求、把回复送回气泡
+前端页面（本仓库）负责画面、走路、点击、动作
+```
+
+要做成完整版，需要：
+
+1. 有 DeepSeek Harness 环境
+2. 把这个插件放进 `profiles/web/local-plugins/`
+3. 改 `config.json`，把 `sessionId` 换成**自己那条会话**的 ID
+4. 素材、坐标、地图沿用本仓库
+
+**为什么插件层没放出来**：
+
+- 它调的是 DSH 的**内部接口**（`sessionController`、折叠注入用的 `dsh-llm`），不是公开 API
+- 写死了本机的绝对路径
+- 换个 DSH 版本就可能失效 —— 属于**实验性代码**，不适合直接发
+
+想让别人也有会说话的版本，需要先把插件层整理成可移植的形式（去掉硬编码、加配置、
+适配不同 DSH 版本），那是另一件事。
+
+### 三、换掉角色/房子
+
+`room/index.html` 与素材完全解耦：
+
+```text
+assets/room/*.png        屋子底图 + 家具 + 动作图
+assets/character/*.png   角色：front / side / back / walk1-8 / backwalk1-8
+```
+
+换成同名文件即可，代码一行不用改。规格见上面「素材规格」。
+家具位置、可走区域、动作图偏移都有对应的编辑工具（`?edit=1` / `?zone=1` / `?act=`）。
+
 ## 许可
 
 - **代码**（`room/index.html`、`tools/`）：MIT，见 [LICENSE](LICENSE)
